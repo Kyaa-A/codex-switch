@@ -1,0 +1,878 @@
+#!/usr/bin/env bash
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  codex-switch — Multi-account manager for OpenAI Codex CLI    ║
+# ║  https://github.com/Kyaa-A/codex-switch                       ║
+# ╚═══════════════════════════════════════════════════════════════╝
+#
+# Switch between multiple Codex CLI accounts without logging out.
+# All accounts share the same conversation history — full /resume support!
+# Zero dependencies. Pure bash. Works everywhere.
+
+set -euo pipefail
+
+VERSION="1.0.0"
+GITHUB_URL="https://github.com/Kyaa-A/codex-switch"
+
+# ── Paths ──────────────────────────────────────────────────────
+CODEX_DIR="$HOME/.codex"
+AUTH_FILE="$CODEX_DIR/auth.json"
+PROFILES_DIR="$CODEX_DIR/.profiles"
+ACTIVE_FILE="$PROFILES_DIR/.active"
+
+# ── Terminal capabilities ──────────────────────────────────────
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 60)
+SUPPORTS_COLOR=true
+if [[ ! -t 1 ]] || [[ "${NO_COLOR:-}" == "1" ]]; then
+    SUPPORTS_COLOR=false
+fi
+
+# ── Colors & Styles ────────────────────────────────────────────
+if $SUPPORTS_COLOR; then
+    RST='\033[0m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    ITALIC='\033[3m'
+    ULINE='\033[4m'
+    # Foreground
+    BLACK='\033[30m'
+    RED='\033[31m'
+    GREEN='\033[32m'
+    YELLOW='\033[33m'
+    BLUE='\033[34m'
+    MAGENTA='\033[35m'
+    CYAN='\033[36m'
+    WHITE='\033[37m'
+    GRAY='\033[90m'
+    # Bright
+    BRED='\033[91m'
+    BGREEN='\033[92m'
+    BYELLOW='\033[93m'
+    BBLUE='\033[94m'
+    BMAGENTA='\033[95m'
+    BCYAN='\033[96m'
+    BWHITE='\033[97m'
+    # Background
+    BG_BLACK='\033[40m'
+    BG_RED='\033[41m'
+    BG_GREEN='\033[42m'
+    BG_BLUE='\033[44m'
+    BG_MAGENTA='\033[45m'
+    BG_CYAN='\033[46m'
+    BG_WHITE='\033[47m'
+    BG_GRAY='\033[100m'
+    # Cursor
+    HIDE_CURSOR='\033[?25l'
+    SHOW_CURSOR='\033[?25h'
+    CLEAR_LINE='\033[2K'
+    MOVE_UP='\033[A'
+else
+    RST='' BOLD='' DIM='' ITALIC='' ULINE=''
+    BLACK='' RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE='' GRAY=''
+    BRED='' BGREEN='' BYELLOW='' BBLUE='' BMAGENTA='' BCYAN='' BWHITE=''
+    BG_BLACK='' BG_RED='' BG_GREEN='' BG_BLUE='' BG_MAGENTA='' BG_CYAN='' BG_WHITE='' BG_GRAY=''
+    HIDE_CURSOR='' SHOW_CURSOR='' CLEAR_LINE='' MOVE_UP=''
+fi
+
+# ── Box-drawing characters ─────────────────────────────────────
+BOX_TL="╭" BOX_TR="╮" BOX_BL="╰" BOX_BR="╯"
+BOX_H="─" BOX_V="│"
+BOX_LT="├" BOX_RT="┤"
+
+# ── Icons ──────────────────────────────────────────────────────
+ICO_CHECK="✔"
+ICO_CROSS="✘"
+ICO_ARROW="❯"
+ICO_DOT="●"
+ICO_RING="○"
+ICO_BOLT="⚡"
+ICO_KEY="🔑"
+ICO_USER="👤"
+ICO_SWAP="⇄"
+ICO_WARN="⚠"
+ICO_LOCK="🔒"
+ICO_STAR="★"
+ICO_CHAT="💬"
+
+# ── OpenAI / Codex brand colors (TrueColor with 256-color fallback) ────
+if $SUPPORTS_COLOR; then
+    HAS_TC=false
+    if [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" || "${TERM:-}" == *"256color"* || "${TERM:-}" == "xterm-kitty" || "${TERM:-}" == "alacritty" ]]; then
+        HAS_TC=true
+    fi
+
+    if $HAS_TC; then
+        OA0='\033[38;2;70;220;180m'  # bright mint highlight
+        OA1='\033[38;2;50;200;160m'  # light emerald
+        OA2='\033[38;2;30;185;145m'  # mint green
+        OA3='\033[38;2;16;163;127m'  # OpenAI brand exact (#10A37F)
+        OA4='\033[38;2;16;163;127m'  # OpenAI brand exact
+        OA5='\033[38;2;14;150;115m'  # rich emerald
+        OA6='\033[38;2;12;135;100m'  # medium emerald
+        OA7='\033[38;2;10;120;90m'   # deep green
+        OA8='\033[38;2;8;105;80m'    # dark pine
+        OA9='\033[38;2;6;90;70m'     # forest green
+        OA10='\033[38;2;5;75;60m'    # shadow green
+        # Shorthands
+        G1='\033[38;2;16;163;127m'   # main brand (#10A37F)
+        G2='\033[38;2;70;220;180m'   # bright mint
+        G3='\033[38;2;30;185;145m'   # soft mint
+        G4='\033[38;2;180;240;220m'  # pale mint
+        G5='\033[38;2;10;120;90m'    # dark emerald
+        GW='\033[38;2;240;255;250m'  # mint white
+    else
+        OA0='\033[38;5;121m'
+        OA1='\033[38;5;115m'
+        OA2='\033[38;5;79m'
+        OA3='\033[38;5;36m'
+        OA4='\033[38;5;36m'
+        OA5='\033[38;5;29m'
+        OA6='\033[38;5;29m'
+        OA7='\033[38;5;29m'
+        OA8='\033[38;5;23m'
+        OA9='\033[38;5;23m'
+        OA10='\033[38;5;23m'
+        G1='\033[38;5;36m'
+        G2='\033[38;5;121m'
+        G3='\033[38;5;79m'
+        G4='\033[38;5;158m'
+        G5='\033[38;5;29m'
+        GW='\033[38;5;231m'
+    fi
+else
+    OA0='' OA1='' OA2='' OA3='' OA4='' OA5='' OA6='' OA7='' OA8='' OA9='' OA10=''
+    G1='' G2='' G3='' G4='' G5='' GW=''
+fi
+
+# ── Helpers ────────────────────────────────────────────────────
+
+ensure_profiles_dir() {
+    mkdir -p "$PROFILES_DIR"
+}
+
+get_active_profile() {
+    if [[ -f "$ACTIVE_FILE" ]]; then
+        cat "$ACTIVE_FILE"
+    else
+        echo ""
+    fi
+}
+
+repeat_char() {
+    local char="$1" count="$2"
+    printf "%0.s${char}" $(seq 1 "$count")
+}
+
+center() {
+    local text="$1" width="${2:-$TERM_WIDTH}"
+    local stripped
+    stripped=$(echo -e "$text" | sed 's/\x1b\[[0-9;]*m//g')
+    local len=${#stripped}
+    local pad=$(( (width - len) / 2 ))
+    [[ $pad -lt 0 ]] && pad=0
+    printf "%${pad}s" ""
+    echo -e "$text"
+}
+
+hr() {
+    local char="${1:-─}" color="${2:-$DIM}"
+    local width=$((TERM_WIDTH > 60 ? 60 : TERM_WIDTH))
+    echo -e "${color}$(repeat_char "$char" "$width")${RST}"
+}
+
+# Extract account metadata from Codex auth.json
+extract_codex_info() {
+    local auth_file="$1"
+    if [[ -f "$auth_file" ]] && command -v python3 &>/dev/null; then
+        python3 -c "
+import json, base64
+
+try:
+    with open('$auth_file') as f:
+        d = json.load(f)
+    mode = d.get('auth_mode', 'unknown')
+    email = 'unknown'
+    account_id = 'unknown'
+
+    if mode == 'chatgpt':
+        tokens = d.get('tokens', {})
+        account_id = tokens.get('account_id', 'unknown')
+        id_tok = tokens.get('id_token', '')
+        if id_tok and '.' in id_tok:
+            try:
+                b64 = id_tok.split('.')[1]
+                b64 += '=' * (-len(b64) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(b64))
+                email = payload.get('email', 'unknown')
+            except:
+                pass
+    elif mode == 'api_key':
+        key = d.get('OPENAI_API_KEY', '')
+        email = f'Key: {key[:7]}...{key[-4:]}' if len(key) > 12 else 'API Key'
+
+    print(f'{mode}|{email}|{account_id}')
+except Exception as e:
+    print('unknown|unknown|unknown')
+" 2>/dev/null
+    else
+        echo "unknown|unknown|unknown"
+    fi
+}
+
+# Count stored local sessions
+count_sessions() {
+    if [[ -d "$CODEX_DIR/sessions" ]]; then
+        find "$CODEX_DIR/sessions" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l
+    elif [[ -f "$CODEX_DIR/session_index.jsonl" ]]; then
+        wc -l < "$CODEX_DIR/session_index.jsonl" 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+# ── Banner ─────────────────────────────────────────────────────
+
+show_banner() {
+    echo ""
+    if [[ $TERM_WIDTH -lt 68 ]]; then
+        show_mini_banner
+        return
+    fi
+
+    echo -e "  ${OA0}${BOLD}       ▄▄██████▄▄       ${RST}"
+    echo -e "  ${OA1}${BOLD}    ▄████▀▀  ▀▀████▄    ${RST}  ${G1}${BOLD}CODEX-SWITCH${RST}  ${DIM}v${VERSION}${RST}"
+    echo -e "  ${OA2}${BOLD}  ▄███▀   ▄██▄   ▀███▄  ${RST}  ${DIM}Multi-account manager for OpenAI Codex CLI${RST}"
+    echo -e "  ${OA3}${BOLD} ▄███    ██████    ███▄ ${RST}  ${DIM}─────────────────────────────────────────${RST}"
+    echo -e "  ${OA4}${BOLD} ███   ▄████████▄   ███ ${RST}  ${G2}▸${RST} ${DIM}shared /resume${RST}  ${BGREEN}✔ all accounts access sessions${RST}"
+    echo -e "  ${OA5}${BOLD} ███  █████  █████  ███ ${RST}  ${G2}▸${RST} ${DIM}version${RST}        ${GW}${BOLD}${VERSION}${RST} ${DIM}#stable${RST}"
+    echo -e "  ${OA6}${BOLD} ███   ▀████████▀   ███ ${RST}  ${G2}▸${RST} ${DIM}repo${RST}           ${BCYAN}${ULINE}${GITHUB_URL}${RST}"
+    echo -e "  ${OA7}${BOLD} ▀███    ██████    ███▀ ${RST}  ${G2}▸${RST} ${DIM}status${RST}         ${GREEN}●${RST} ${WHITE}ready${RST}"
+    echo -e "  ${OA8}${BOLD}  ▀███▄   ▀██▀   ▄███▀  ${RST}  ${DIM}─────────────────────────────────────────${RST}"
+    echo -e "  ${OA9}${BOLD}    ▀████▄▄  ▄▄████▀    ${RST}  ${DIM}Zero logout · Shared /resume · Pure bash${RST}"
+    echo -e "  ${OA10}${BOLD}       ▀▀██████▀▀       ${RST}"
+    echo ""
+    echo -e "  ${OA0}━${OA1}━${OA2}━${OA3}━${OA4}━${OA5}━${OA6}━${OA7}━${OA8}━${OA9}━${OA10}━${OA9}━${OA8}━${OA7}━${OA6}━${OA5}━${OA4}━${OA3}━${OA2}━${OA1}━${OA0}━${OA1}━${OA2}━${OA3}━${OA4}━${OA5}━${OA6}━${OA7}━${OA8}━${OA9}━${OA10}━${OA9}━${OA8}━${OA7}━${OA6}━${OA5}━${OA4}━${OA3}━${OA2}━${OA1}━${OA0}━${OA1}━${OA2}━${OA3}━${OA4}━${OA5}━${OA6}━${OA7}━${OA8}━${OA9}━${OA10}━${RST}"
+    echo ""
+}
+
+show_mini_banner() {
+    echo ""
+    echo -e "    ${OA0}${BOLD} ▄████▄ ${RST}  ${G1}${BOLD}codex-switch${RST} ${DIM}v${VERSION}${RST}"
+    echo -e "    ${OA3}${BOLD}███  ███${RST}  ${DIM}Multi-account manager for OpenAI Codex CLI${RST}"
+    echo -e "    ${OA6}${BOLD} ▀████▀ ${RST}  ${DIM}Shared /resume · ${GITHUB_URL}${RST}"
+    echo ""
+}
+
+# ── Interactive Menu ───────────────────────────────────────────
+
+interactive_select() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    local count=${#options[@]}
+    local selected=0
+
+    if [[ $count -eq 0 ]]; then
+        echo -e "  ${RED}${ICO_CROSS} No options available${RST}"
+        return 1
+    fi
+
+    echo -ne "$HIDE_CURSOR"
+    trap 'echo -ne "$SHOW_CURSOR"' EXIT INT TERM
+
+    echo -e "  ${BOLD}${prompt}${RST}"
+    echo -e "  ${DIM}Use ↑↓ arrows (or j/k) to navigate, Enter to select, q to cancel${RST}"
+    echo ""
+
+    local i
+    for ((i = 0; i < count; i++)); do
+        if [[ $i -eq $selected ]]; then
+            echo -e "  ${G2}${BOLD}${ICO_ARROW} ${options[$i]}${RST}"
+        else
+            echo -e "  ${DIM}  ${options[$i]}${RST}"
+        fi
+    done
+
+    while true; do
+        IFS= read -rsn1 key
+
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.01 rest
+                case "$rest" in
+                    '[A') ((selected > 0)) && ((selected--)) ;;
+                    '[B') ((selected < count - 1)) && ((selected++)) ;;
+                esac
+                ;;
+            'k') ((selected > 0)) && ((selected--)) ;;
+            'j') ((selected < count - 1)) && ((selected++)) ;;
+            '') break ;;
+            'q'|'Q')
+                echo -ne "$SHOW_CURSOR"
+                echo ""
+                echo -e "  ${DIM}Cancelled${RST}"
+                return 1
+                ;;
+        esac
+
+        for ((i = 0; i < count; i++)); do
+            echo -ne "\033[A${CLEAR_LINE}"
+        done
+
+        for ((i = 0; i < count; i++)); do
+            if [[ $i -eq $selected ]]; then
+                echo -e "  ${G2}${BOLD}${ICO_ARROW} ${options[$i]}${RST}"
+            else
+                echo -e "  ${DIM}  ${options[$i]}${RST}"
+            fi
+        done
+    done
+
+    echo -ne "$SHOW_CURSOR"
+    echo ""
+
+    SELECTED_INDEX=$selected
+    SELECTED_VALUE="${options[$selected]}"
+    return 0
+}
+
+input_prompt() {
+    local prompt="$1" default="${2:-}"
+    local result
+
+    if [[ -n "$default" ]]; then
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}(${default})${RST}: "
+    else
+        echo -ne "  ${BOLD}${prompt}${RST}: "
+    fi
+    read -r result
+    if [[ -z "$result" && -n "$default" ]]; then
+        result="$default"
+    fi
+    echo "$result"
+}
+
+confirm() {
+    local prompt="$1" default="${2:-y}"
+    local yn
+
+    if [[ "$default" == "y" ]]; then
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[Y/n]${RST}: "
+    else
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[y/N]${RST}: "
+    fi
+    read -r yn
+    yn="${yn:-$default}"
+    [[ "$yn" =~ ^[Yy] ]]
+}
+
+# ── Pretty output helpers ─────────────────────────────────────
+
+print_profile_card() {
+    local name="$1" email="$2" mode="$3" is_active="$4"
+    local width=56
+
+    local active_badge=""
+    local name_color="$BWHITE"
+    local border_color="$DIM"
+    local tree_color="$DIM"
+    if [[ "$is_active" == "true" ]]; then
+        active_badge="  ${G1}${BOLD}⚡ ACTIVE${RST}"
+        name_color="$G2"
+        border_color="$G1"
+        tree_color="$G3"
+    fi
+
+    echo -e "    ${border_color}┌$(repeat_char "─" $width)┐${RST}"
+    echo -e "    ${border_color}│${RST}  ${name_color}${BOLD}${name}${RST}${active_badge}"
+    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}account${RST}  ${BCYAN}${email}${RST}"
+    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}auth${RST}     ${BYELLOW}${BOLD}${mode}${RST}"
+    echo -e "    ${border_color}│${RST}  ${tree_color}└─${RST} ${G3}resume${RST}   ${BGREEN}shared across all profiles${RST}"
+    echo -e "    ${border_color}└$(repeat_char "─" $width)┘${RST}"
+}
+
+msg_success() { echo -e "  ${BGREEN}${BOLD}[+]${RST} $*"; }
+msg_error()   { echo -e "  ${BRED}${BOLD}[-]${RST} $*" >&2; }
+msg_warn()    { echo -e "  ${BYELLOW}${BOLD}[!]${RST} $*"; }
+msg_info()    { echo -e "  ${BCYAN}${BOLD}[*]${RST} $*"; }
+msg_step()    { echo -e "  ${BMAGENTA}${BOLD}[>]${RST} $*"; }
+
+# ── Profile helpers ────────────────────────────────────────────
+
+get_profile_names() {
+    local profiles=()
+    if [[ -d "$PROFILES_DIR" ]]; then
+        for dir in "$PROFILES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            profiles+=("$(basename "$dir")")
+        done
+    fi
+    echo "${profiles[@]}"
+}
+
+get_profile_info() {
+    local name="$1"
+    local auth_file="$PROFILES_DIR/$name/auth.json"
+    local info
+    info=$(extract_codex_info "$auth_file")
+    IFS='|' read -r PROF_MODE PROF_EMAIL PROF_ACCOUNT_ID <<< "$info"
+}
+
+# ── Commands ───────────────────────────────────────────────────
+
+cmd_save() {
+    local name="${1:-}"
+
+    show_mini_banner
+
+    if [[ -z "$name" ]]; then
+        echo -e "  ${BOLD}Save current Codex session as a profile${RST}"
+        echo ""
+        name=$(input_prompt "${ICO_KEY} Profile name")
+        if [[ -z "$name" ]]; then
+            msg_error "Profile name cannot be empty"
+            exit 1
+        fi
+    fi
+
+    ensure_profiles_dir
+
+    if [[ ! -f "$AUTH_FILE" ]]; then
+        msg_error "No credentials found at ${ULINE}${AUTH_FILE}${RST}"
+        msg_info "Login first: ${BOLD}codex login${RST}"
+        exit 1
+    fi
+
+    local profile_dir="$PROFILES_DIR/$name"
+    if [[ -d "$profile_dir" ]]; then
+        echo ""
+        msg_warn "Profile ${BOLD}'$name'${RST} already exists"
+        if ! confirm "Overwrite?" "y"; then
+            echo ""
+            msg_info "Cancelled"
+            exit 0
+        fi
+    fi
+
+    mkdir -p "$profile_dir"
+    cp "$AUTH_FILE" "$profile_dir/auth.json"
+    echo "$name" > "$ACTIVE_FILE"
+
+    echo ""
+    msg_success "Profile ${BOLD}${BGREEN}'$name'${RST} saved!"
+    echo ""
+
+    get_profile_info "$name"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "true"
+    echo ""
+}
+
+cmd_use() {
+    local name="${1:-}"
+
+    show_mini_banner
+    ensure_profiles_dir
+
+    local profile_arr=()
+    read -ra profile_arr <<< "$(get_profile_names)"
+
+    if [[ ${#profile_arr[@]} -eq 0 ]]; then
+        msg_warn "No profiles saved yet"
+        echo ""
+        msg_info "Save your current session first:"
+        echo -e "    ${BOLD}codex-switch save <name>${RST}"
+        exit 1
+    fi
+
+    local active
+    active=$(get_active_profile)
+
+    if [[ -z "$name" ]]; then
+        local display_options=()
+        for p in "${profile_arr[@]}"; do
+            get_profile_info "$p"
+            local marker=""
+            if [[ "$p" == "$active" ]]; then
+                marker=" ${GREEN}(active)${RST}"
+            fi
+            display_options+=("${BOLD}${p}${RST}  ${DIM}${PROF_EMAIL}  [${PROF_MODE}]${RST}${marker}")
+        done
+
+        if interactive_select "${ICO_SWAP} Select Codex account to switch to:" "${display_options[@]}"; then
+            name="${profile_arr[$SELECTED_INDEX]}"
+        else
+            exit 0
+        fi
+    fi
+
+    local profile_dir="$PROFILES_DIR/$name"
+    if [[ ! -f "$profile_dir/auth.json" ]]; then
+        msg_error "Profile ${BOLD}'$name'${RST} not found!"
+        echo ""
+        exit 1
+    fi
+
+    if [[ "$name" == "$active" ]]; then
+        msg_info "Already on profile ${BOLD}'$name'${RST}"
+        exit 0
+    fi
+
+    # Auto-save current auth before switching so tokens are never lost!
+    if [[ -n "$active" && -f "$AUTH_FILE" ]]; then
+        local current_dir="$PROFILES_DIR/$active"
+        mkdir -p "$current_dir"
+        cp "$AUTH_FILE" "$current_dir/auth.json"
+        msg_info "Auto-saved current profile '${BOLD}${active}${RST}'"
+    fi
+
+    # Switch auth
+    cp "$profile_dir/auth.json" "$AUTH_FILE"
+    echo "$name" > "$ACTIVE_FILE"
+
+    echo ""
+    msg_success "Switched to ${BOLD}${BGREEN}'$name'${RST}!"
+    echo ""
+
+    get_profile_info "$name"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "true"
+
+    echo ""
+    msg_info "All your previous session history is preserved!"
+    msg_info "Run ${BOLD}codex resume${RST} or use ${BOLD}/resume${RST} to continue any chat."
+    echo ""
+}
+
+cmd_list() {
+    show_mini_banner
+    ensure_profiles_dir
+
+    local active
+    active=$(get_active_profile)
+
+    local profile_arr=()
+    read -ra profile_arr <<< "$(get_profile_names)"
+
+    if [[ ${#profile_arr[@]} -eq 0 ]]; then
+        echo -e "  ${DIM}No profiles saved yet.${RST}"
+        echo ""
+        echo -e "  ${BOLD}Quick start:${RST}"
+        echo -e "    ${CYAN}1.${RST} ${BOLD}codex-switch save <name>${RST}    ${DIM}# save current login${RST}"
+        echo -e "    ${CYAN}2.${RST} ${BOLD}codex-switch login${RST}          ${DIM}# login to another account${RST}"
+        echo -e "    ${CYAN}3.${RST} ${BOLD}codex-switch save <name>${RST}    ${DIM}# save that one too${RST}"
+        echo -e "    ${CYAN}4.${RST} ${BOLD}codex-switch use <name>${RST}     ${DIM}# switch anytime!${RST}"
+        echo ""
+        return
+    fi
+
+    echo -e "  ${BOLD}${ICO_KEY} Saved Codex Profiles${RST} ${DIM}(${#profile_arr[@]} total)${RST}"
+    echo ""
+
+    for pname in "${profile_arr[@]}"; do
+        local is_active="false"
+        [[ "$pname" == "$active" ]] && is_active="true"
+
+        get_profile_info "$pname"
+        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_MODE" "$is_active"
+        echo ""
+    done
+
+    local scount
+    scount=$(count_sessions)
+    echo -e "  ${G3}${ICO_CHAT} Shared Sessions:${RST} ${BOLD}${scount}${RST} conversations available to ${BOLD}codex resume${RST}"
+    echo ""
+}
+
+cmd_status() {
+    show_mini_banner
+    ensure_profiles_dir
+
+    local active
+    active=$(get_active_profile)
+
+    if [[ -z "$active" ]]; then
+        msg_info "No active profile tracked"
+        msg_info "Save current session: ${BOLD}codex-switch save <name>${RST}"
+        echo ""
+        return
+    fi
+
+    echo -e "  ${BOLD}${ICO_BOLT} Current Codex Session${RST}"
+    echo ""
+
+    get_profile_info "$active"
+    print_profile_card "$active" "$PROF_EMAIL" "$PROF_MODE" "true"
+
+    echo ""
+    msg_step "Verifying with Codex CLI..."
+    if command -v codex &>/dev/null; then
+        local live_status
+        live_status=$(codex login status 2>&1 || echo "Logged out")
+        if [[ "$live_status" == *"Logged in"* ]]; then
+            msg_success "Session is ${BOLD}${GREEN}valid${RST} — ${live_status}"
+        else
+            msg_warn "Status: ${live_status}"
+        fi
+    fi
+
+    local scount
+    scount=$(count_sessions)
+    echo ""
+    msg_info "Shared session pool: ${BOLD}${scount}${RST} conversations available to ${BOLD}codex resume${RST}"
+    echo ""
+}
+
+cmd_rename() {
+    local old_name="${1:-}"
+    local new_name="${2:-}"
+
+    show_mini_banner
+    ensure_profiles_dir
+
+    local profile_arr=()
+    read -ra profile_arr <<< "$(get_profile_names)"
+
+    if [[ ${#profile_arr[@]} -eq 0 ]]; then
+        msg_warn "No profiles to rename"
+        exit 0
+    fi
+
+    if [[ -z "$old_name" ]]; then
+        local display_options=()
+        for p in "${profile_arr[@]}"; do
+            get_profile_info "$p"
+            display_options+=("${BOLD}${p}${RST}  ${DIM}${PROF_EMAIL}${RST}")
+        done
+
+        if interactive_select "${ICO_STAR} Select profile to rename:" "${display_options[@]}"; then
+            old_name="${profile_arr[$SELECTED_INDEX]}"
+        else
+            exit 0
+        fi
+    fi
+
+    local old_dir="$PROFILES_DIR/$old_name"
+    if [[ ! -d "$old_dir" ]]; then
+        msg_error "Profile ${BOLD}'$old_name'${RST} not found!"
+        exit 1
+    fi
+
+    if [[ -z "$new_name" ]]; then
+        echo ""
+        new_name=$(input_prompt "New name for '${old_name}'" "")
+        if [[ -z "$new_name" ]]; then
+            msg_error "New profile name cannot be empty"
+            exit 1
+        fi
+    fi
+
+    local new_dir="$PROFILES_DIR/$new_name"
+    if [[ -d "$new_dir" ]]; then
+        msg_error "Profile ${BOLD}'$new_name'${RST} already exists!"
+        exit 1
+    fi
+
+    mv "$old_dir" "$new_dir"
+
+    local active
+    active=$(get_active_profile)
+    if [[ "$old_name" == "$active" ]]; then
+        echo "$new_name" > "$ACTIVE_FILE"
+    fi
+
+    echo ""
+    msg_success "Renamed profile ${BOLD}'$old_name'${RST} to ${BOLD}${BGREEN}'$new_name'${RST}"
+    echo ""
+}
+
+cmd_delete() {
+    local name="${1:-}"
+
+    show_mini_banner
+    ensure_profiles_dir
+
+    if [[ -z "$name" ]]; then
+        local profile_arr=()
+        read -ra profile_arr <<< "$(get_profile_names)"
+
+        if [[ ${#profile_arr[@]} -eq 0 ]]; then
+            msg_warn "No profiles to delete"
+            exit 0
+        fi
+
+        local display_options=()
+        for p in "${profile_arr[@]}"; do
+            get_profile_info "$p"
+            display_options+=("${BOLD}${p}${RST}  ${DIM}${PROF_EMAIL}${RST}")
+        done
+
+        if interactive_select "${ICO_CROSS} Select profile to delete:" "${display_options[@]}"; then
+            name="${profile_arr[$SELECTED_INDEX]}"
+        else
+            exit 0
+        fi
+    fi
+
+    local profile_dir="$PROFILES_DIR/$name"
+    if [[ ! -d "$profile_dir" ]]; then
+        msg_error "Profile ${BOLD}'$name'${RST} not found!"
+        exit 1
+    fi
+
+    echo ""
+    get_profile_info "$name"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "false"
+    echo ""
+
+    if ! confirm "${RED}Delete this profile?${RST}" "n"; then
+        msg_info "Cancelled"
+        exit 0
+    fi
+
+    local active
+    active=$(get_active_profile)
+    if [[ "$name" == "$active" ]]; then
+        rm -f "$ACTIVE_FILE"
+    fi
+
+    rm -rf "$profile_dir"
+    echo ""
+    msg_success "Profile ${BOLD}'$name'${RST} deleted"
+    echo ""
+}
+
+cmd_login() {
+    show_mini_banner
+    ensure_profiles_dir
+
+    echo -e "  ${BOLD}${ICO_KEY} Add a new Codex account${RST}"
+    echo ""
+
+    local active
+    active=$(get_active_profile)
+
+    # Auto-save current session if exists so you NEVER lose it!
+    if [[ -f "$AUTH_FILE" ]]; then
+        if [[ -n "$active" ]]; then
+            local current_dir="$PROFILES_DIR/$active"
+            mkdir -p "$current_dir"
+            cp "$AUTH_FILE" "$current_dir/auth.json"
+            msg_info "Current profile '${BOLD}${active}${RST}' auto-saved"
+            echo ""
+        else
+            msg_warn "Existing active Codex session detected!"
+            msg_info "Saving your current session first so you don't lose it..."
+            echo ""
+            local prev_name
+            prev_name=$(input_prompt "Name for your current logged-in account" "main")
+            prev_name="${prev_name:-main}"
+            cmd_save "$prev_name"
+            echo ""
+        fi
+    fi
+
+    msg_step "Opening Codex login..."
+    echo ""
+
+    # Run codex login
+    codex login
+
+    echo ""
+
+    # Ask for profile name
+    local name
+    name=$(input_prompt "${ICO_KEY} Save new account as" "")
+    if [[ -n "$name" ]]; then
+        cmd_save "$name"
+    else
+        msg_info "Skipped saving. You can save later with: ${BOLD}codex-switch save <name>${RST}"
+    fi
+}
+
+cmd_help() {
+    show_banner
+
+    echo -e "  ${BOLD}USAGE${RST}"
+    echo -e "    ${BWHITE}codex-switch${RST} ${DIM}[command] [options]${RST}"
+    echo ""
+    echo -e "  ${BOLD}COMMANDS${RST}"
+    echo ""
+    echo -e "    ${BCYAN}save${RST} ${DIM}<name>${RST}          Save current login as a named profile"
+    echo -e "    ${BCYAN}use${RST} ${DIM}[name]${RST}           Switch to a saved profile (interactive if omitted)"
+    echo -e "    ${BCYAN}list${RST}                List all saved profiles with details"
+    echo -e "    ${BCYAN}rename${RST} ${DIM}[old] [new]${RST}   Rename a saved profile"
+    echo -e "    ${BCYAN}status${RST}              Show active profile + live verification"
+    echo -e "    ${BCYAN}login${RST}               Login to a new account and save it"
+    echo -e "    ${BCYAN}delete${RST} ${DIM}[name]${RST}        Delete a saved profile (interactive if omitted)"
+    echo -e "    ${BCYAN}help${RST}                Show this help message"
+    echo ""
+    echo -e "  ${BOLD}QUICK START${RST}"
+    echo ""
+    echo -e "    ${GRAY}# Step 1: Save current login under any name you want${RST}"
+    echo -e "    ${GREEN}\$${RST} codex-switch save <name>"
+    echo ""
+    echo -e "    ${GRAY}# Step 2: Login to another account${RST}"
+    echo -e "    ${GREEN}\$${RST} codex-switch login"
+    echo ""
+    echo -e "    ${GRAY}# Step 3: Switch between them anytime${RST}"
+    echo -e "    ${GREEN}\$${RST} codex-switch use <name>"
+    echo ""
+    echo -e "    ${GRAY}# All sessions are shared — run anytime:${RST}"
+    echo -e "    ${GREEN}\$${RST} codex resume"
+    echo ""
+    echo -e "  ${BOLD}HOW IT WORKS${RST}"
+    echo ""
+    echo -e "    Swaps ${ULINE}~/.codex/auth.json${RST} between saved snapshots."
+    echo -e "    ${GREEN}${ICO_CHECK}${RST} No logout required       ${GREEN}${ICO_CHECK}${RST} Shared /resume history"
+    echo -e "    ${GREEN}${ICO_CHECK}${RST} Auto-saves on switch     ${GREEN}${ICO_CHECK}${RST} Zero dependencies"
+    echo ""
+}
+
+cmd_interactive() {
+    show_banner
+    ensure_profiles_dir
+
+    local options=(
+        "${ICO_SWAP}  Switch account"
+        "${ICO_KEY}  Save current session"
+        "${ICO_USER}  Login new account"
+        "${ICO_DOT}  List all profiles"
+        "${ICO_STAR}  Rename a profile"
+        "${ICO_BOLT}  Check status"
+        "${ICO_CROSS}  Delete a profile"
+    )
+
+    if interactive_select "What would you like to do?" "${options[@]}"; then
+        echo ""
+        case $SELECTED_INDEX in
+            0) cmd_use ;;
+            1) cmd_save ;;
+            2) cmd_login ;;
+            3) cmd_list ;;
+            4) cmd_rename ;;
+            5) cmd_status ;;
+            6) cmd_delete ;;
+        esac
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        save)          cmd_save "${2:-}" ;;
+        use|switch)    cmd_use "${2:-}" ;;
+        list|ls)       cmd_list ;;
+        rename|mv)     cmd_rename "${2:-}" "${3:-}" ;;
+        status|whoami) cmd_status ;;
+        delete|rm)     cmd_delete "${2:-}" ;;
+        login|add)     cmd_login ;;
+        help|--help|-h) cmd_help ;;
+        --version|-v)  echo "codex-switch v${VERSION}" ;;
+        "")            cmd_interactive ;;
+        *)
+            msg_error "Unknown command: ${BOLD}$1${RST}"
+            echo ""
+            echo -e "  Run ${BOLD}codex-switch help${RST} for usage"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
