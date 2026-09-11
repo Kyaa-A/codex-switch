@@ -191,30 +191,38 @@ try:
         d = json.load(f)
     mode = d.get('auth_mode', 'unknown')
     email = 'unknown'
-    account_id = 'unknown'
+    plan = 'unknown'
 
     if mode == 'chatgpt':
         tokens = d.get('tokens', {})
-        account_id = tokens.get('account_id', 'unknown')
-        id_tok = tokens.get('id_token', '')
-        if id_tok and '.' in id_tok:
-            try:
-                b64 = id_tok.split('.')[1]
-                b64 += '=' * (-len(b64) % 4)
-                payload = json.loads(base64.urlsafe_b64decode(b64))
-                email = payload.get('email', 'unknown')
-            except:
-                pass
+        for tok_key in ['id_token', 'access_token']:
+            tok = tokens.get(tok_key, '')
+            if tok and '.' in tok:
+                try:
+                    b64 = tok.split('.')[1]
+                    b64 += '=' * (-len(b64) % 4)
+                    claims = json.loads(base64.urlsafe_b64decode(b64))
+                    if email == 'unknown':
+                        email = claims.get('email') or claims.get('https://api.openai.com/profile', {}).get('email', 'unknown')
+                    if plan == 'unknown':
+                        auth_claims = claims.get('https://api.openai.com/auth', {})
+                        if isinstance(auth_claims, dict):
+                            plan = auth_claims.get('chatgpt_plan_type', 'unknown')
+                except Exception:
+                    pass
+        if plan == 'unknown':
+            plan = 'chatgpt'
     elif mode == 'api_key':
         key = d.get('OPENAI_API_KEY', '')
         email = f'Key: {key[:7]}...{key[-4:]}' if len(key) > 12 else 'API Key'
+        plan = 'api'
 
-    print(f'{mode}|{email}|{account_id}')
+    print(f'{email}|{plan}')
 except Exception as e:
-    print('unknown|unknown|unknown')
+    print('unknown|unknown')
 " 2>/dev/null
     else
-        echo "unknown|unknown|unknown"
+        echo "unknown|unknown"
     fi
 }
 
@@ -368,7 +376,7 @@ confirm() {
 # ── Pretty output helpers ─────────────────────────────────────
 
 print_profile_card() {
-    local name="$1" email="$2" mode="$3" is_active="$4"
+    local name="$1" email="$2" plan="$3" is_active="$4"
     local width=56
 
     local active_badge=""
@@ -384,9 +392,8 @@ print_profile_card() {
 
     echo -e "    ${border_color}┌$(repeat_char "─" $width)┐${RST}"
     echo -e "    ${border_color}│${RST}  ${name_color}${BOLD}${name}${RST}${active_badge}"
-    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}account${RST}  ${BCYAN}${email}${RST}"
-    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}auth${RST}     ${BYELLOW}${BOLD}${mode}${RST}"
-    echo -e "    ${border_color}│${RST}  ${tree_color}└─${RST} ${G3}resume${RST}   ${BGREEN}shared across all profiles${RST}"
+    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}email${RST}   ${BCYAN}${email}${RST}"
+    echo -e "    ${border_color}│${RST}  ${tree_color}└─${RST} ${G3}plan${RST}    ${G2}${BOLD}${plan}${RST}"
     echo -e "    ${border_color}└$(repeat_char "─" $width)┘${RST}"
 }
 
@@ -414,7 +421,7 @@ get_profile_info() {
     local auth_file="$PROFILES_DIR/$name/auth.json"
     local info
     info=$(extract_codex_info "$auth_file")
-    IFS='|' read -r PROF_MODE PROF_EMAIL PROF_ACCOUNT_ID <<< "$info"
+    IFS='|' read -r PROF_EMAIL PROF_PLAN <<< "$info"
 }
 
 # ── Commands ───────────────────────────────────────────────────
@@ -462,7 +469,7 @@ cmd_save() {
     echo ""
 
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "true"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true"
     echo ""
 }
 
@@ -494,7 +501,7 @@ cmd_use() {
             if [[ "$p" == "$active" ]]; then
                 marker=" ${GREEN}(active)${RST}"
             fi
-            display_options+=("${BOLD}${p}${RST}  ${DIM}${PROF_EMAIL}  [${PROF_MODE}]${RST}${marker}")
+            display_options+=("${BOLD}${p}${RST}  ${DIM}${PROF_EMAIL}  [${PROF_PLAN}]${RST}${marker}")
         done
 
         if interactive_select "${ICO_SWAP} Select Codex account to switch to:" "${display_options[@]}"; then
@@ -533,7 +540,7 @@ cmd_use() {
     echo ""
 
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "true"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true"
 
     echo ""
     msg_info "All your previous session history is preserved!"
@@ -571,7 +578,7 @@ cmd_list() {
         [[ "$pname" == "$active" ]] && is_active="true"
 
         get_profile_info "$pname"
-        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_MODE" "$is_active"
+        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_PLAN" "$is_active"
         echo ""
     done
 
@@ -599,7 +606,7 @@ cmd_status() {
     echo ""
 
     get_profile_info "$active"
-    print_profile_card "$active" "$PROF_EMAIL" "$PROF_MODE" "true"
+    print_profile_card "$active" "$PROF_EMAIL" "$PROF_PLAN" "true"
 
     echo ""
     msg_step "Verifying with Codex CLI..."
@@ -719,7 +726,7 @@ cmd_delete() {
 
     echo ""
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_MODE" "false"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "false"
     echo ""
 
     if ! confirm "${RED}Delete this profile?${RST}" "n"; then
