@@ -98,36 +98,34 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
     $ codex resume
 ```
 
-### Profile Cards with Shared Session Counter (`codex-switch list`)
+### Profile Cards with Live Usage & Shared Sessions (`codex-switch list`)
 
 ```
-     ▄████▄   codex-switch v1.0.0
+     ▄████▄   codex-switch v1.1.0
     ███  ███  Multi-account manager for OpenAI Codex CLI
      ▀████▀   Shared /resume · https://github.com/Kyaa-A/codex-switch
 
   🔑 Saved Codex Profiles (2 total)
 
-    ┌────────────────────────────────────────────────────────┐
-    │  work  ⚡ ACTIVE
-    │  ├─ account  alex@company.com
-    │  ├─ auth     chatgpt
-    │  └─ resume   shared across all profiles
-    └────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  work  ⚡ ACTIVE  🔒 248d remaining                                       │
+  │  ├─ email  alex@company.com        │ 5h [░░░░░░░░░░]   0% · in 5h 0m     │
+  │  └─ plan   team                    │ wk [████████░░]  82% · in 3d 19h    │
+  └──────────────────────────────────────────────────────────────────────────┘
 
-    ┌────────────────────────────────────────────────────────┐
-    │  personal
-    │  ├─ account  alex@gmail.com
-    │  ├─ auth     chatgpt
-    │  └─ resume   shared across all profiles
-    └────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  personal  🔒 18d remaining                                               │
+  │  ├─ email  alex@gmail.com          │ 5h [░░░░░░░░░░]   0% · in 4h 59m    │
+  │  └─ plan   plus                    │ wk [░░░░░░░░░░]   0% · in 6d 23h    │
+  └──────────────────────────────────────────────────────────────────────────┘
 
-  💬 Shared Sessions: 12 conversations available to codex resume
+  💬 Shared Sessions: 838 conversations available to codex resume
 ```
 
 ### Interactive Switcher (`codex-switch use`)
 
 ```
-     ▄████▄   codex-switch v1.0.0
+     ▄████▄   codex-switch v1.1.0
     ███  ███  Multi-account manager for OpenAI Codex CLI
      ▀████▀   Shared /resume · https://github.com/Kyaa-A/codex-switch
 

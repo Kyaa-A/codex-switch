@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 GITHUB_URL="https://github.com/Kyaa-A/codex-switch"
 
 # ── Paths ──────────────────────────────────────────────────────
@@ -508,35 +508,251 @@ confirm() {
 
 # ── Pretty output helpers ─────────────────────────────────────
 
+render_profile_cards() {
+    local target="${1:-all}"
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import json, sys, os, time, re, datetime, glob
+import urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
+
+profiles_dir = '$PROFILES_DIR'
+auth_file_root = '$AUTH_FILE'
+active_file = '$ACTIVE_FILE'
+
+active_name = ''
+if os.path.exists(active_file):
+    try:
+        with open(active_file) as f:
+            active_name = f.read().strip()
+    except Exception:
+        pass
+
+def strip_ansi(s):
+    return re.sub(r'\033\[[0-9;]*m', '', s)
+
+def pad_visible(s, target_len):
+    cur_len = len(strip_ansi(s))
+    if cur_len < target_len:
+        return s + ' ' * (target_len - cur_len)
+    return s
+
+def format_delta(seconds):
+    if seconds <= 0:
+        return 'now'
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d > 0:
+        return f'in {d}d {h}h'
+    if h > 0:
+        return f'in {h}h {m}m'
+    return f'in {m}m'
+
+def make_bar(percent, width=10):
+    percent = max(0, min(100, percent))
+    filled = int(round((percent / 100.0) * width))
+    empty = width - filled
+    if percent >= 90:
+        c = '\033[38;2;239;68;68m'
+    elif percent >= 70:
+        c = '\033[38;2;245;158;11m'
+    else:
+        c = '\033[38;2;16;163;127m'
+    return f'{c}{\"█\" * filled}\033[2m{\"░\" * empty}\033[0m'
+
+def get_profile_data(pname):
+    p_auth = os.path.join(profiles_dir, pname, 'auth.json')
+    if pname == active_name and os.path.exists(auth_file_root):
+        p_auth = auth_file_root
+
+    email = 'unknown'
+    plan = 'unknown'
+    sub_days = None
+    sub_expired = False
+    tokens = {}
+
+    if os.path.exists(p_auth):
+        try:
+            with open(p_auth) as f:
+                d = json.load(f)
+            mode = d.get('auth_mode', 'chatgpt')
+            if mode == 'api_key':
+                key = d.get('OPENAI_API_KEY', '')
+                email = f'Key: {key[:7]}...{key[-4:]}' if len(key) > 12 else 'API Key'
+                plan = 'api'
+            else:
+                tokens = d.get('tokens', {})
+                for tok_k in ['id_token', 'access_token']:
+                    tok = tokens.get(tok_k, '')
+                    if tok and '.' in tok:
+                        try:
+                            import base64
+                            b64 = tok.split('.')[1]
+                            b64 += '=' * (-len(b64) % 4)
+                            claims = json.loads(base64.urlsafe_b64decode(b64))
+                            if email == 'unknown':
+                                email = claims.get('email') or claims.get('https://api.openai.com/profile', {}).get('email', 'unknown')
+                            if plan == 'unknown':
+                                ac = claims.get('https://api.openai.com/auth', {})
+                                if isinstance(ac, dict):
+                                    plan = ac.get('chatgpt_plan_type', 'unknown')
+                            if sub_days is None and not sub_expired:
+                                ac = claims.get('https://api.openai.com/auth', {})
+                                if isinstance(ac, dict):
+                                    su = ac.get('chatgpt_subscription_active_until')
+                                    if su:
+                                        dt = datetime.datetime.fromisoformat(su.replace('Z', '+00:00'))
+                                        now = datetime.datetime.now(datetime.timezone.utc)
+                                        diff = (dt - now).days
+                                        if diff < 0:
+                                            sub_expired = True
+                                        else:
+                                            sub_days = diff
+                        except Exception:
+                            pass
+                if plan == 'unknown':
+                    plan = 'chatgpt'
+        except Exception:
+            pass
+
+    # Fetch usage
+    r1 = '\033[2musage: unavailable\033[0m'
+    r2 = ''
+    access_token = tokens.get('access_token')
+    account_id = tokens.get('account_id')
+    if plan == 'api':
+        r1 = '\033[2musage: api key mode\033[0m'
+        r2 = '\033[2m(direct api billing)\033[0m'
+    elif not access_token:
+        r1 = '\033[33musage: no token\033[0m'
+        r2 = '\033[2m(run codex login)\033[0m'
+    else:
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'User-Agent': 'codex_cli_rs',
+            'Accept': 'application/json',
+        }
+        if account_id:
+            headers['ChatGPT-Account-Id'] = account_id
+        req = urllib.request.Request('https://chatgpt.com/backend-api/codex/usage', headers=headers)
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    u = json.loads(resp.read().decode())
+                    rl = u.get('rate_limit', {})
+                    pw = rl.get('primary_window', {})
+                    sw = rl.get('secondary_window', {})
+                    now_ts = time.time()
+
+                    p_used = pw.get('used_percent', 0)
+                    p_rst = pw.get('reset_at', 0)
+                    p_rem = max(0, p_rst - now_ts)
+                    p_warn = ' \033[31m⚠\033[0m' if p_used >= 100 else (' \033[33m⚠\033[0m' if p_used >= 90 else '')
+                    r1 = f'5h [{make_bar(p_used)}] {p_used:>3}% \033[2m· {format_delta(p_rem)}\033[0m{p_warn}'
+
+                    s_used = sw.get('used_percent', 0)
+                    s_rst = sw.get('reset_at', 0)
+                    s_rem = max(0, s_rst - now_ts)
+                    s_warn = ' \033[31m⚠\033[0m' if s_used >= 100 else (' \033[33m⚠\033[0m' if s_used >= 90 else '')
+                    r2 = f'wk [{make_bar(s_used)}] {s_used:>3}% \033[2m· {format_delta(s_rem)}\033[0m{s_warn}'
+                    break
+            except urllib.error.HTTPError as e:
+                if e.code == 403 and attempt == 0:
+                    time.sleep(0.3)
+                    continue
+                if e.code in (401, 403):
+                    r1 = '\033[33m⚡ usage: session expired\033[0m'
+                    r2 = '\033[2m(run codex login to refresh)\033[0m'
+                elif e.code == 429:
+                    r1 = '\033[33m⚡ usage: rate limited\033[0m'
+                    r2 = '\033[2m(try again shortly)\033[0m'
+                else:
+                    r1 = f'\033[31musage: http {e.code}\033[0m'
+                break
+            except Exception as e:
+                if 'timed out' in str(e).lower():
+                    r1 = '\033[2musage: timed out\033[0m'
+                else:
+                    r1 = '\033[2musage: unavailable (offline)\033[0m'
+                break
+
+    return {
+        'name': pname,
+        'email': email,
+        'plan': plan,
+        'sub_days': sub_days,
+        'sub_expired': sub_expired,
+        'is_active': (pname == active_name),
+        'r1': r1,
+        'r2': r2,
+    }
+
+target = '$target'
+if target == 'all' or not target:
+    profiles = sorted([os.path.basename(p) for p in glob.glob(os.path.join(profiles_dir, '*')) if os.path.isdir(p)])
+else:
+    profiles = [target] if os.path.isdir(os.path.join(profiles_dir, target)) else []
+
+if not profiles:
+    sys.exit(0)
+
+with ThreadPoolExecutor(max_workers=min(4, max(1, len(profiles)))) as pool:
+    data_list = list(pool.map(get_profile_data, profiles))
+
+left_w = 35
+right_w = 36
+inner_w = left_w + 3 + right_w
+
+for item in data_list:
+    is_act = item['is_active']
+    border = '\033[38;2;16;163;127m' if is_act else '\033[2m'
+    name_c = '\033[38;2;16;163;127m\033[1m' if is_act else '\033[1m'
+    tree_c = '\033[38;2;90;210;175m' if is_act else '\033[2m'
+    lbl_c = '\033[38;2;90;210;175m' if is_act else '\033[2m'
+    rst = '\033[0m'
+    div = f' {border}│{rst} '
+
+    act_badge = f'  \033[38;2;16;163;127m\033[1m⚡ ACTIVE\033[0m' if is_act else ''
+    sub_badge = ''
+    if item['sub_expired']:
+        sub_badge = '  \033[1;31m[EXPIRED]\033[0m'
+    elif item['sub_days'] is not None:
+        sub_badge = f'  \033[38;2;90;210;175m🔒 {item[\"sub_days\"]}d remaining\033[0m'
+
+    title = f'  {name_c}{item[\"name\"]}{rst}{act_badge}{sub_badge}'
+    
+    email_disp = item['email']
+    if len(email_disp) > 22:
+        email_disp = email_disp[:20] + '..'
+    l1 = f'  {tree_c}├─{rst} {lbl_c}email{rst}  \033[1;36m{email_disp}\033[0m'
+    l2 = f'  {tree_c}└─{rst} {lbl_c}plan{rst}   \033[38;2;16;163;127m\033[1m{item[\"plan\"]}\033[0m'
+
+    print(f'  {border}┌{\"─\" * inner_w}┐{rst}')
+    print(f'  {border}│{rst}' + pad_visible(title, inner_w) + f'{border}│{rst}')
+    print(f'  {border}│{rst}' + pad_visible(l1, left_w) + div + pad_visible(item['r1'], right_w) + f'{border}│{rst}')
+    print(f'  {border}│{rst}' + pad_visible(l2, left_w) + div + pad_visible(item['r2'], right_w) + f'{border}│{rst}')
+    print(f'  {border}└{\"─\" * inner_w}┘{rst}')
+    print('')
+"
+    else
+        local pname="$target"
+        [[ "$target" == "all" ]] && pname="$(get_active_profile)"
+        local email="unknown" plan="unknown" sub="" is_active="false"
+        [[ -n "$pname" ]] && get_profile_info "$pname"
+        [[ "$pname" == "$(get_active_profile)" ]] && is_active="true"
+        echo -e "    ┌────────────────────────────────────────────────────────┐"
+        echo -e "    │  ${pname}"
+        echo -e "    │  ├─ email   ${PROF_EMAIL}"
+        echo -e "    │  └─ plan    ${PROF_PLAN}"
+        echo -e "    └────────────────────────────────────────────────────────┘"
+        echo ""
+    fi
+}
+
 print_profile_card() {
-    local name="$1" email="$2" plan="$3" is_active="$4" sub_status="${5:-unknown}"
-    local width=56
-
-    local active_badge=""
-    local name_color="$BWHITE"
-    local border_color="$DIM"
-    local tree_color="$DIM"
-    if [[ "$is_active" == "true" ]]; then
-        active_badge="  ${G1}${BOLD}⚡ ACTIVE${RST}"
-        name_color="$G2"
-        border_color="$G1"
-        tree_color="$G3"
-    fi
-
-    # Subscription status badge
-    local sub_badge=""
-    if [[ "$sub_status" == expired ]]; then
-        sub_badge="  ${BRED}${BOLD}[EXPIRED]${RST}"
-    elif [[ "$sub_status" == valid:* ]]; then
-        local days="${sub_status#valid:}"
-        sub_badge="  ${G3}${ICO_LOCK} ${days} remaining${RST}"
-    fi
-
-    echo -e "    ${border_color}┌$(repeat_char "─" $width)┐${RST}"
-    echo -e "    ${border_color}│${RST}  ${name_color}${BOLD}${name}${RST}${active_badge}${sub_badge}"
-    echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}email${RST}   ${BCYAN}${email}${RST}"
-    echo -e "    ${border_color}│${RST}  ${tree_color}└─${RST} ${G3}plan${RST}    ${G2}${BOLD}${plan}${RST}"
-    echo -e "    ${border_color}└$(repeat_char "─" $width)┘${RST}"
+    local name="$1"
+    render_profile_cards "$name"
 }
 
 msg_success() { echo -e "  ${BGREEN}${BOLD}[+]${RST} $*"; }
@@ -721,14 +937,7 @@ cmd_list() {
     echo -e "  ${BOLD}${ICO_KEY} Saved Codex Profiles${RST} ${DIM}(${#profile_arr[@]} total)${RST}"
     echo ""
 
-    for pname in "${profile_arr[@]}"; do
-        local is_active="false"
-        [[ "$pname" == "$active" ]] && is_active="true"
-
-        get_profile_info "$pname"
-        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_PLAN" "$is_active" "$PROF_SUB"
-        echo ""
-    done
+    render_profile_cards "all"
 
     local scount
     scount=$(count_sessions)
@@ -753,10 +962,8 @@ cmd_status() {
     echo -e "  ${BOLD}${ICO_BOLT} Current Codex Session${RST}"
     echo ""
 
-    get_profile_info "$active"
-    print_profile_card "$active" "$PROF_EMAIL" "$PROF_PLAN" "true" "$PROF_SUB"
+    render_profile_cards "$active"
 
-    echo ""
     msg_step "Verifying with Codex CLI..."
     if command -v codex &>/dev/null; then
         local live_status
@@ -767,9 +974,6 @@ cmd_status() {
             msg_warn "Status: ${live_status}"
         fi
     fi
-
-    echo ""
-    show_codex_usage "$active" "$AUTH_FILE"
 
     local scount
     scount=$(count_sessions)
