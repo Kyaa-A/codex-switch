@@ -319,7 +319,7 @@ try:
             u = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            print('  \033[31m[-] Session expired (HTTP 401). Run codex login to re-authenticate this account.\033[0m')
+            print('  \033[33m[!] Token inactive (switch with codex-switch use to activate)\033[0m')
         else:
             print(f'  \033[31m[-] Usage query failed: HTTP {e.code}\033[0m')
         exit(0)
@@ -513,7 +513,7 @@ render_profile_cards() {
     if command -v python3 &>/dev/null; then
         python3 -c "
 import json, sys, os, time, re, datetime, glob
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 profiles_dir = '$PROFILES_DIR'
@@ -662,8 +662,39 @@ def get_profile_data(pname):
                     time.sleep(0.3)
                     continue
                 if e.code in (401, 403):
-                    r1 = '\033[33m⚡ usage: session expired\033[0m'
-                    r2 = '\033[2m(run codex login to refresh)\033[0m'
+                    rf = tokens.get('refresh_token')
+                    if rf and attempt == 0:
+                        try:
+                            r_data = urllib.parse.urlencode({
+                                'grant_type': 'refresh_token',
+                                'client_id': 'app_EMoamEEZ73f0CkXaXp7hrann',
+                                'refresh_token': rf
+                            }).encode()
+                            r_req = urllib.request.Request('https://auth.openai.com/oauth/token', data=r_data, headers={
+                                'Content-Type': 'application/x-www-form-urlencoded',
+                                'User-Agent': 'codex_cli_rs'
+                            })
+                            with urllib.request.urlopen(r_req, timeout=5) as r_resp:
+                                r_res = json.loads(r_resp.read().decode())
+                                new_at = r_res.get('access_token')
+                                new_rt = r_res.get('refresh_token')
+                                if new_at:
+                                    tokens['access_token'] = new_at
+                                    if new_rt:
+                                        tokens['refresh_token'] = new_rt
+                                    d['tokens'] = tokens
+                                    try:
+                                        with open(p_auth, 'w') as out_f:
+                                            json.dump(d, out_f, indent=2)
+                                    except Exception:
+                                        pass
+                                    headers['Authorization'] = f'Bearer {new_at}'
+                                    req = urllib.request.Request('https://chatgpt.com/backend-api/codex/usage', headers=headers)
+                                    continue
+                        except Exception:
+                            pass
+                    r1 = '\033[33musage: token inactive\033[0m'
+                    r2 = '\033[2m(switch to activate)\033[0m'
                 elif e.code == 429:
                     r1 = '\033[33m⚡ usage: rate limited\033[0m'
                     r2 = '\033[2m(try again shortly)\033[0m'
@@ -999,9 +1030,12 @@ cmd_usage() {
         read -ra profile_arr <<< "$(get_profile_names)"
         for p in "${profile_arr[@]}"; do
             local auth_file="$PROFILES_DIR/$p/auth.json"
-            get_profile_info "$p"
             local is_act="false"
-            [[ "$p" == "$active" ]] && is_act="true"
+            if [[ "$p" == "$active" ]]; then
+                is_act="true"
+                [[ -f "$AUTH_FILE" ]] && auth_file="$AUTH_FILE"
+            fi
+            get_profile_info "$p"
             print_profile_card "$p" "$PROF_EMAIL" "$PROF_PLAN" "$is_act" "$PROF_SUB"
             echo ""
             show_codex_usage "$p" "$auth_file"
@@ -1021,9 +1055,13 @@ cmd_usage() {
         return 1
     fi
 
-    get_profile_info "$target"
     local is_act="false"
-    [[ "$target" == "$active" ]] && is_act="true"
+    if [[ "$target" == "$active" ]]; then
+        is_act="true"
+        [[ -f "$AUTH_FILE" ]] && auth_file="$AUTH_FILE"
+    fi
+
+    get_profile_info "$target"
     print_profile_card "$target" "$PROF_EMAIL" "$PROF_PLAN" "$is_act" "$PROF_SUB"
     echo ""
     show_codex_usage "$target" "$auth_file"
