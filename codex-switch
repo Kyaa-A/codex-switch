@@ -348,14 +348,21 @@ input_prompt() {
     local result
 
     if [[ -n "$default" ]]; then
-        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}(${default})${RST}: "
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}(${default})${RST}: " >&2
     else
-        echo -ne "  ${BOLD}${prompt}${RST}: "
+        echo -ne "  ${BOLD}${prompt}${RST}: " >&2
     fi
-    read -r result
+    if [[ -t 0 ]]; then
+        read -r result
+    elif [[ -e /dev/tty ]]; then
+        read -r result </dev/tty
+    else
+        read -r result
+    fi
     if [[ -z "$result" && -n "$default" ]]; then
         result="$default"
     fi
+    result=$(echo "$result" | tr -d '\r' | xargs 2>/dev/null || echo "$result")
     echo "$result"
 }
 
@@ -364,11 +371,17 @@ confirm() {
     local yn
 
     if [[ "$default" == "y" ]]; then
-        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[Y/n]${RST}: "
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[Y/n]${RST}: " >&2
     else
-        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[y/N]${RST}: "
+        echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[y/N]${RST}: " >&2
     fi
-    read -r yn
+    if [[ -t 0 ]]; then
+        read -r yn
+    elif [[ -e /dev/tty ]]; then
+        read -r yn </dev/tty
+    else
+        read -r yn
+    fi
     yn="${yn:-$default}"
     [[ "$yn" =~ ^[Yy] ]]
 }
@@ -439,6 +452,12 @@ cmd_save() {
             msg_error "Profile name cannot be empty"
             exit 1
         fi
+    fi
+
+    name=$(echo "$name" | tr -cd '[:alnum:]_-')
+    if [[ -z "$name" ]]; then
+        msg_error "Profile name must contain alphanumeric characters, '-', or '_'"
+        exit 1
     fi
 
     ensure_profiles_dir
@@ -669,6 +688,12 @@ cmd_rename() {
             msg_error "New profile name cannot be empty"
             exit 1
         fi
+    fi
+
+    new_name=$(echo "$new_name" | tr -cd '[:alnum:]_-')
+    if [[ -z "$new_name" ]]; then
+        msg_error "New profile name must contain alphanumeric characters, '-', or '_'"
+        exit 1
     fi
 
     local new_dir="$PROFILES_DIR/$new_name"
