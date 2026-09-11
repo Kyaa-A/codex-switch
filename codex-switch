@@ -184,7 +184,7 @@ extract_codex_info() {
     local auth_file="$1"
     if [[ -f "$auth_file" ]] && command -v python3 &>/dev/null; then
         python3 -c "
-import json, base64
+import json, base64, datetime
 
 try:
     with open('$auth_file') as f:
@@ -192,6 +192,7 @@ try:
     mode = d.get('auth_mode', 'unknown')
     email = 'unknown'
     plan = 'unknown'
+    sub_badge = 'unknown'
 
     if mode == 'chatgpt':
         tokens = d.get('tokens', {})
@@ -208,6 +209,18 @@ try:
                         auth_claims = claims.get('https://api.openai.com/auth', {})
                         if isinstance(auth_claims, dict):
                             plan = auth_claims.get('chatgpt_plan_type', 'unknown')
+                    if sub_badge == 'unknown':
+                        auth_claims = claims.get('https://api.openai.com/auth', {})
+                        if isinstance(auth_claims, dict):
+                            sub_until = auth_claims.get('chatgpt_subscription_active_until')
+                            if sub_until:
+                                dt = datetime.datetime.fromisoformat(sub_until.replace('Z', '+00:00'))
+                                now = datetime.datetime.now(datetime.timezone.utc)
+                                delta = (dt - now).days
+                                if delta < 0:
+                                    sub_badge = 'expired'
+                                else:
+                                    sub_badge = f'valid:{delta}d'
                 except Exception:
                     pass
         if plan == 'unknown':
@@ -217,12 +230,12 @@ try:
         email = f'Key: {key[:7]}...{key[-4:]}' if len(key) > 12 else 'API Key'
         plan = 'api'
 
-    print(f'{email}|{plan}')
+    print(f'{email}|{plan}|{sub_badge}')
 except Exception as e:
-    print('unknown|unknown')
+    print('unknown|unknown|unknown')
 " 2>/dev/null
     else
-        echo "unknown|unknown"
+        echo "unknown|unknown|unknown"
     fi
 }
 
@@ -235,6 +248,113 @@ count_sessions() {
     else
         echo "0"
     fi
+}
+
+# Fetch and display live quota & rate limits for a Codex profile
+show_codex_usage() {
+    local prof_name="$1"
+    local auth_file="$2"
+
+    if [[ ! -f "$auth_file" ]]; then
+        msg_error "Auth file for '$prof_name' not found"
+        return 1
+    fi
+
+    if ! command -v python3 &>/dev/null; then
+        msg_warn "python3 required to query live usage"
+        return 1
+    fi
+
+    python3 -c "
+import json, time, datetime, urllib.request, urllib.error
+
+def format_delta(seconds):
+    if seconds <= 0:
+        return 'now'
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    parts = []
+    if d > 0:
+        parts.append(f'{d}d')
+    if h > 0 or d > 0:
+        parts.append(f'{h}h')
+    parts.append(f'{m}m')
+    return ' '.join(parts)
+
+def color_bar(percent, width=22):
+    percent = max(0, min(100, percent))
+    filled = int(round((percent / 100.0) * width))
+    empty = width - filled
+    if percent >= 90:
+        c = '\033[38;2;239;68;68m'
+    elif percent >= 70:
+        c = '\033[38;2;245;158;11m'
+    else:
+        c = '\033[38;2;16;163;127m'
+    return f'{c}{\"█\" * filled}\033[2m{\"░\" * empty}\033[0m'
+
+try:
+    with open('$auth_file') as f:
+        d = json.load(f)
+    tokens = d.get('tokens', {})
+    access_token = tokens.get('access_token')
+    account_id = tokens.get('account_id')
+    
+    if not access_token:
+        print('  \033[33m[!] No access token available for this profile\033[0m')
+        exit(0)
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'User-Agent': 'codex_cli_rs',
+        'Accept': 'application/json',
+    }
+    if account_id:
+        headers['ChatGPT-Account-Id'] = account_id
+
+    req = urllib.request.Request('https://chatgpt.com/backend-api/codex/usage', headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            u = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            print('  \033[31m[-] Session expired (HTTP 401). Run codex login to re-authenticate this account.\033[0m')
+        else:
+            print(f'  \033[31m[-] Usage query failed: HTTP {e.code}\033[0m')
+        exit(0)
+    except Exception as e:
+        print(f'  \033[31m[-] Usage query network error: {e}\033[0m')
+        exit(0)
+
+    rl = u.get('rate_limit', {})
+    pw = rl.get('primary_window', {})
+    sw = rl.get('secondary_window', {})
+    now_ts = time.time()
+
+    p_used = pw.get('used_percent', 0)
+    p_rst = pw.get('reset_at', 0)
+    p_rem = max(0, p_rst - now_ts)
+    p_time = datetime.datetime.fromtimestamp(p_rst).strftime('%-I:%M %p') if p_rst else 'unknown'
+
+    s_used = sw.get('used_percent', 0)
+    s_rst = sw.get('reset_at', 0)
+    s_rem = max(0, s_rst - now_ts)
+    s_time = datetime.datetime.fromtimestamp(s_rst).strftime('%a %-I:%M %p') if s_rst else 'unknown'
+
+    print(f'  \033[1m📊 Quota & Rate Limits\033[0m \033[2m($prof_name)\033[0m')
+    print('    \033[2m┌────────────────────────────────────────────────────────┐\033[0m')
+    p_warn = '  \033[31m⚠ limit reached\033[0m' if p_used >= 100 else ('  \033[33m⚠ high\033[0m' if p_used >= 90 else '')
+    print(f'    \033[2m│\033[0m  \033[1m5-Hour Limit:\033[0m   {p_used:>2}% used{p_warn}')
+    print(f'    \033[2m│\033[0m  [{color_bar(p_used)}] \033[2mresets in {format_delta(p_rem)} ({p_time})\033[0m')
+    print('    \033[2m│\033[0m')
+    s_warn = '  \033[31m⚠ limit reached\033[0m' if s_used >= 100 else ('  \033[33m⚠ high\033[0m' if s_used >= 90 else '')
+    print(f'    \033[2m│\033[0m  \033[1mWeekly Limit:\033[0m   {s_used:>2}% used{s_warn}')
+    print(f'    \033[2m│\033[0m  [{color_bar(s_used)}] \033[2mresets in {format_delta(s_rem)} ({s_time})\033[0m')
+    print('    \033[2m└────────────────────────────────────────────────────────┘\033[0m')
+except Exception as e:
+    pass
+" 2>/dev/null
 }
 
 # ── Banner ─────────────────────────────────────────────────────
@@ -389,7 +509,7 @@ confirm() {
 # ── Pretty output helpers ─────────────────────────────────────
 
 print_profile_card() {
-    local name="$1" email="$2" plan="$3" is_active="$4"
+    local name="$1" email="$2" plan="$3" is_active="$4" sub_status="${5:-unknown}"
     local width=56
 
     local active_badge=""
@@ -403,8 +523,17 @@ print_profile_card() {
         tree_color="$G3"
     fi
 
+    # Subscription status badge
+    local sub_badge=""
+    if [[ "$sub_status" == expired ]]; then
+        sub_badge="  ${BRED}${BOLD}[EXPIRED]${RST}"
+    elif [[ "$sub_status" == valid:* ]]; then
+        local days="${sub_status#valid:}"
+        sub_badge="  ${G3}${ICO_LOCK} ${days} remaining${RST}"
+    fi
+
     echo -e "    ${border_color}┌$(repeat_char "─" $width)┐${RST}"
-    echo -e "    ${border_color}│${RST}  ${name_color}${BOLD}${name}${RST}${active_badge}"
+    echo -e "    ${border_color}│${RST}  ${name_color}${BOLD}${name}${RST}${active_badge}${sub_badge}"
     echo -e "    ${border_color}│${RST}  ${tree_color}├─${RST} ${G3}email${RST}   ${BCYAN}${email}${RST}"
     echo -e "    ${border_color}│${RST}  ${tree_color}└─${RST} ${G3}plan${RST}    ${G2}${BOLD}${plan}${RST}"
     echo -e "    ${border_color}└$(repeat_char "─" $width)┘${RST}"
@@ -434,7 +563,7 @@ get_profile_info() {
     local auth_file="$PROFILES_DIR/$name/auth.json"
     local info
     info=$(extract_codex_info "$auth_file")
-    IFS='|' read -r PROF_EMAIL PROF_PLAN <<< "$info"
+    IFS='|' read -r PROF_EMAIL PROF_PLAN PROF_SUB <<< "$info"
 }
 
 # ── Commands ───────────────────────────────────────────────────
@@ -488,7 +617,7 @@ cmd_save() {
     echo ""
 
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true" "$PROF_SUB"
     echo ""
 }
 
@@ -559,7 +688,7 @@ cmd_use() {
     echo ""
 
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "true" "$PROF_SUB"
 
     echo ""
     msg_info "All your previous session history is preserved!"
@@ -597,7 +726,7 @@ cmd_list() {
         [[ "$pname" == "$active" ]] && is_active="true"
 
         get_profile_info "$pname"
-        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_PLAN" "$is_active"
+        print_profile_card "$pname" "$PROF_EMAIL" "$PROF_PLAN" "$is_active" "$PROF_SUB"
         echo ""
     done
 
@@ -625,7 +754,7 @@ cmd_status() {
     echo ""
 
     get_profile_info "$active"
-    print_profile_card "$active" "$PROF_EMAIL" "$PROF_PLAN" "true"
+    print_profile_card "$active" "$PROF_EMAIL" "$PROF_PLAN" "true" "$PROF_SUB"
 
     echo ""
     msg_step "Verifying with Codex CLI..."
@@ -639,10 +768,61 @@ cmd_status() {
         fi
     fi
 
+    echo ""
+    show_codex_usage "$active" "$AUTH_FILE"
+
     local scount
     scount=$(count_sessions)
     echo ""
     msg_info "Shared session pool: ${BOLD}${scount}${RST} conversations available to ${BOLD}codex resume${RST}"
+    echo ""
+}
+
+cmd_usage() {
+    local target="${1:-}"
+    show_mini_banner
+    ensure_profiles_dir
+
+    local active
+    active=$(get_active_profile)
+
+    if [[ -z "$target" ]]; then
+        target="$active"
+    fi
+
+    if [[ "$target" == "all" ]]; then
+        local profile_arr=()
+        read -ra profile_arr <<< "$(get_profile_names)"
+        for p in "${profile_arr[@]}"; do
+            local auth_file="$PROFILES_DIR/$p/auth.json"
+            get_profile_info "$p"
+            local is_act="false"
+            [[ "$p" == "$active" ]] && is_act="true"
+            print_profile_card "$p" "$PROF_EMAIL" "$PROF_PLAN" "$is_act" "$PROF_SUB"
+            echo ""
+            show_codex_usage "$p" "$auth_file"
+            echo ""
+        done
+        return
+    fi
+
+    if [[ -z "$target" ]]; then
+        msg_error "No active profile tracked. Specify profile: codex-switch usage <name>"
+        return 1
+    fi
+
+    local auth_file="$PROFILES_DIR/$target/auth.json"
+    if [[ ! -f "$auth_file" ]]; then
+        msg_error "Profile '$target' not found!"
+        return 1
+    fi
+
+    get_profile_info "$target"
+    local is_act="false"
+    [[ "$target" == "$active" ]] && is_act="true"
+    print_profile_card "$target" "$PROF_EMAIL" "$PROF_PLAN" "$is_act" "$PROF_SUB"
+    echo ""
+    show_codex_usage "$target" "$auth_file"
     echo ""
 }
 
@@ -751,7 +931,7 @@ cmd_delete() {
 
     echo ""
     get_profile_info "$name"
-    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "false"
+    print_profile_card "$name" "$PROF_EMAIL" "$PROF_PLAN" "false" "$PROF_SUB"
     echo ""
 
     if ! confirm "${RED}Delete this profile?${RST}" "n"; then
@@ -830,8 +1010,9 @@ cmd_help() {
     echo -e "    ${BCYAN}save${RST} ${DIM}<name>${RST}          Save current login as a named profile"
     echo -e "    ${BCYAN}use${RST} ${DIM}[name]${RST}           Switch to a saved profile (interactive if omitted)"
     echo -e "    ${BCYAN}list${RST}                List all saved profiles with details"
+    echo -e "    ${BCYAN}usage${RST} ${DIM}[name|all]${RST}     Show 5-hour and weekly usage + reset countdowns"
     echo -e "    ${BCYAN}rename${RST} ${DIM}[old] [new]${RST}   Rename a saved profile"
-    echo -e "    ${BCYAN}status${RST}              Show active profile + live verification"
+    echo -e "    ${BCYAN}status${RST}              Show active profile + live verification + usage"
     echo -e "    ${BCYAN}login${RST}               Login to a new account and save it"
     echo -e "    ${BCYAN}delete${RST} ${DIM}[name]${RST}        Delete a saved profile (interactive if omitted)"
     echo -e "    ${BCYAN}help${RST}                Show this help message"
@@ -867,6 +1048,7 @@ cmd_interactive() {
         "${ICO_KEY}  Save current session"
         "${ICO_USER}  Login new account"
         "${ICO_DOT}  List all profiles"
+        "${ICO_BOLT}  Check usage & rate limits"
         "${ICO_STAR}  Rename a profile"
         "${ICO_BOLT}  Check status"
         "${ICO_CROSS}  Delete a profile"
@@ -879,9 +1061,10 @@ cmd_interactive() {
             1) cmd_save ;;
             2) cmd_login ;;
             3) cmd_list ;;
-            4) cmd_rename ;;
-            5) cmd_status ;;
-            6) cmd_delete ;;
+            4) cmd_usage ;;
+            5) cmd_rename ;;
+            6) cmd_status ;;
+            7) cmd_delete ;;
         esac
     fi
 }
@@ -891,6 +1074,7 @@ main() {
         save)          cmd_save "${2:-}" ;;
         use|switch)    cmd_use "${2:-}" ;;
         list|ls)       cmd_list ;;
+        usage|limits)  cmd_usage "${2:-}" ;;
         rename|mv)     cmd_rename "${2:-}" "${3:-}" ;;
         status|whoami) cmd_status ;;
         delete|rm)     cmd_delete "${2:-}" ;;
