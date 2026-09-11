@@ -221,7 +221,7 @@ except Exception as e:
 # Count stored local sessions
 count_sessions() {
     if [[ -d "$CODEX_DIR/sessions" ]]; then
-        find "$CODEX_DIR/sessions" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l
+        find "$CODEX_DIR/sessions" -name "*.jsonl" 2>/dev/null | wc -l
     elif [[ -f "$CODEX_DIR/session_index.jsonl" ]]; then
         wc -l < "$CODEX_DIR/session_index.jsonl" 2>/dev/null || echo "0"
     else
