@@ -6,15 +6,16 @@
 #
 # Switch between multiple Codex CLI accounts without logging out.
 # All accounts share the same conversation history — full /resume support!
-# Zero dependencies. Pure bash. Works everywhere.
+# Bash CLI with Python 3 for credential validation and account details.
 
 set -euo pipefail
+umask 077
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 GITHUB_URL="https://github.com/Kyaa-A/codex-switch"
 
 # ── Paths ──────────────────────────────────────────────────────
-CODEX_DIR="$HOME/.codex"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 AUTH_FILE="$CODEX_DIR/auth.json"
 PROFILES_DIR="$CODEX_DIR/.profiles"
 ACTIVE_FILE="$PROFILES_DIR/.active"
@@ -22,7 +23,7 @@ ACTIVE_FILE="$PROFILES_DIR/.active"
 # ── Terminal capabilities ──────────────────────────────────────
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 60)
 SUPPORTS_COLOR=true
-if [[ ! -t 1 ]] || [[ "${NO_COLOR:-}" == "1" ]]; then
+if [[ ! -t 1 ]] || [[ -n "${NO_COLOR:-}" ]]; then
     SUPPORTS_COLOR=false
 fi
 
@@ -145,17 +146,137 @@ fi
 
 # ── Helpers ────────────────────────────────────────────────────
 
+LOCK_HELD=false
+LOGIN_PENDING=false
+LOGIN_BACKUP=""
+LOGIN_PREVIOUS_ACTIVE=""
+
+acquire_profile_lock() {
+    if $LOCK_HELD; then
+        return
+    fi
+    ensure_profiles_dir
+    if ! mkdir "$PROFILES_DIR/.lock" 2>/dev/null; then
+        msg_error "Another profile operation is running. If it was interrupted, remove $PROFILES_DIR/.lock after checking no switcher is running."
+        return 1
+    fi
+    LOCK_HELD=true
+}
+
+restore_login() {
+    # Clear tracking first so failed recovery cannot attribute the wrong account.
+    rm -f "$ACTIVE_FILE" || return 1
+    if [[ -n "$LOGIN_BACKUP" ]]; then
+        atomic_copy "$LOGIN_BACKUP" "$AUTH_FILE" || return 1
+        if [[ -n "$LOGIN_PREVIOUS_ACTIVE" ]]; then
+            set_active_profile "$LOGIN_PREVIOUS_ACTIVE" || return 1
+        fi
+    else
+        rm -f "$AUTH_FILE" || return 1
+    fi
+    LOGIN_PENDING=false
+}
+
+cleanup() {
+    local result=$?
+    if $LOGIN_PENDING; then
+        restore_login || msg_error "Could not restore login; backup remains at $LOGIN_BACKUP"
+    fi
+    if $LOCK_HELD; then
+        rmdir "$PROFILES_DIR/.lock" || true
+    fi
+    printf '%b' "$SHOW_CURSOR"
+    return "$result"
+}
+
+valid_profile_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9_-]+$ && "$1" != "all" ]]
+}
+
+validate_profile_name() {
+    if ! valid_profile_name "$1"; then
+        msg_error "Use only letters, numbers, '-' and '_' for profile names; 'all' is reserved."
+        return 1
+    fi
+    if [[ -L "$PROFILES_DIR/$1" ]]; then
+        msg_error "Symlinked profiles are not supported."
+        return 1
+    fi
+}
+
 ensure_profiles_dir() {
+    if [[ -L "$PROFILES_DIR" ]]; then
+        msg_error "Symlinked profile directories are not supported."
+        return 1
+    fi
     mkdir -p "$PROFILES_DIR"
+    chmod 700 "$PROFILES_DIR"
 }
 
 get_active_profile() {
     if [[ -f "$ACTIVE_FILE" ]]; then
-        cat "$ACTIVE_FILE"
-    else
-        echo ""
+        local active
+        active=$(cat "$ACTIVE_FILE")
+        validate_profile_name "$active" || return 1
+        printf '%s\n' "$active"
     fi
 }
+
+atomic_copy() {
+    local source="$1" destination="$2" staged
+    if [[ -L "$source" || -L "$destination" || -d "$destination" ]]; then
+        msg_error "Credential paths must be regular files."
+        return 1
+    fi
+    staged=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+    if ! cat "$source" > "$staged" || ! chmod 600 "$staged" || ! mv -f "$staged" "$destination"; then
+        rm -f "$staged"
+        msg_error "Could not safely write credentials."
+        return 1
+    fi
+}
+
+set_active_profile() {
+    local staged
+    staged=$(mktemp "$PROFILES_DIR/.active.XXXXXX") || return 1
+    printf '%s\n' "$1" > "$staged"
+    if [[ -d "$ACTIVE_FILE" ]] || ! mv -f "$staged" "$ACTIVE_FILE"; then
+        rm -f "$staged"
+        return 1
+    fi
+}
+
+validate_credentials() {
+    if ! command -v python3 >/dev/null; then
+        msg_error "python3 is required to validate credential files."
+        return 1
+    fi
+    if [[ -L "$1" ]] || ! python3 - "$1" <<'PYVALIDATE'
+import json, sys
+try:
+    with open(sys.argv[1]) as source:
+        data = json.load(source)
+    def token(value):
+        return isinstance(value, str) and bool(value.strip())
+    tokens = data.get('tokens') or {}
+    valid = token(data.get('OPENAI_API_KEY')) or (isinstance(tokens, dict) and token(tokens.get('access_token')))
+except (OSError, ValueError, AttributeError, TypeError):
+    sys.exit(1)
+sys.exit(0 if valid else 1)
+PYVALIDATE
+    then
+        msg_error "Credentials are missing, malformed, or unsupported. Login with CLI file storage first."
+        return 1
+    fi
+}
+
+backup_untracked_login() {
+    local backup
+    backup=$(mktemp "$PROFILES_DIR/.unsaved-XXXXXX") || return 1
+    atomic_copy "$AUTH_FILE" "$backup" || return 1
+    msg_info "Preserved untracked credentials at $backup"
+}
+
 
 repeat_char() {
     local char="$1" count="$2"
@@ -183,11 +304,12 @@ hr() {
 extract_codex_info() {
     local auth_file="$1"
     if [[ -f "$auth_file" ]] && command -v python3 &>/dev/null; then
-        python3 -c "
+        SWITCH_COLOR="$SUPPORTS_COLOR" python3 - "$auth_file" 2>/dev/null <<'PYCODE'
+import sys
 import json, base64, datetime
 
 try:
-    with open('$auth_file') as f:
+    with open(sys.argv[1]) as f:
         d = json.load(f)
     mode = d.get('auth_mode', 'unknown')
     email = 'unknown'
@@ -233,7 +355,7 @@ try:
     print(f'{email}|{plan}|{sub_badge}')
 except Exception as e:
     print('unknown|unknown|unknown')
-" 2>/dev/null
+PYCODE
     else
         echo "unknown|unknown|unknown"
     fi
@@ -265,7 +387,12 @@ show_codex_usage() {
         return 1
     fi
 
-    python3 -c "
+    SWITCH_COLOR="$SUPPORTS_COLOR" python3 - "$auth_file" "$prof_name" 2>/dev/null <<'PYCODE'
+import sys, re, os, builtins
+def print(*args, **kwargs):
+    if os.environ.get('SWITCH_COLOR') != 'true':
+        args = tuple(re.sub(r'\x1b\[[0-9;]*m', '', str(arg)) for arg in args)
+    builtins.print(*args, **kwargs)
 import json, time, datetime, urllib.request, urllib.error
 
 def format_delta(seconds):
@@ -292,10 +419,10 @@ def color_bar(percent, width=22):
         c = '\033[38;2;245;158;11m'
     else:
         c = '\033[38;2;16;163;127m'
-    return f'{c}{\"█\" * filled}\033[2m{\"░\" * empty}\033[0m'
+    return f'{c}{"█" * filled}\033[2m{"░" * empty}\033[0m'
 
 try:
-    with open('$auth_file') as f:
+    with open(sys.argv[1]) as f:
         d = json.load(f)
     tokens = d.get('tokens', {})
     access_token = tokens.get('access_token')
@@ -319,7 +446,7 @@ try:
             u = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            print('  \033[33m[!] Token inactive (switch with codex-switch use to activate)\033[0m')
+            print('  \033[33m[!] Access token expired or rejected; open codex to renew login\033[0m')
         else:
             print(f'  \033[31m[-] Usage query failed: HTTP {e.code}\033[0m')
         exit(0)
@@ -342,7 +469,7 @@ try:
     s_rem = max(0, s_rst - now_ts)
     s_time = datetime.datetime.fromtimestamp(s_rst).strftime('%a %-I:%M %p') if s_rst else 'unknown'
 
-    print(f'  \033[1m📊 Quota & Rate Limits\033[0m \033[2m($prof_name)\033[0m')
+    print(f'  \033[1m📊 Quota & Rate Limits\033[0m \033[2m({sys.argv[2]})\033[0m')
     print('    \033[2m┌────────────────────────────────────────────────────────┐\033[0m')
     p_warn = '  \033[31m⚠ limit reached\033[0m' if p_used >= 100 else ('  \033[33m⚠ high\033[0m' if p_used >= 90 else '')
     print(f'    \033[2m│\033[0m  \033[1m5-Hour Limit:\033[0m   {p_used:>2}% used{p_warn}')
@@ -354,7 +481,7 @@ try:
     print('    \033[2m└────────────────────────────────────────────────────────┘\033[0m')
 except Exception as e:
     pass
-" 2>/dev/null
+PYCODE
 }
 
 # ── Banner ─────────────────────────────────────────────────────
@@ -405,7 +532,7 @@ interactive_select() {
     fi
 
     echo -ne "$HIDE_CURSOR"
-    trap 'echo -ne "$SHOW_CURSOR"' EXIT INT TERM
+
 
     echo -e "  ${BOLD}${prompt}${RST}"
     echo -e "  ${DIM}Use ↑↓ arrows (or j/k) to navigate, Enter to select, q to cancel${RST}"
@@ -421,11 +548,12 @@ interactive_select() {
     done
 
     while true; do
-        IFS= read -rsn1 key
+        IFS= read -rsn1 key || { printf '%b' "$SHOW_CURSOR"; return 1; }
 
         case "$key" in
             $'\x1b')
-                read -rsn2 -t 0.01 rest
+                rest=""
+                read -rsn2 -t 0.05 rest || true
                 case "$rest" in
                     '[A') ((selected > 0)) && ((selected--)) ;;
                     '[B') ((selected < count - 1)) && ((selected++)) ;;
@@ -472,17 +600,11 @@ input_prompt() {
     else
         echo -ne "  ${BOLD}${prompt}${RST}: " >&2
     fi
-    if [[ -t 0 ]]; then
-        read -r result
-    elif [[ -e /dev/tty ]]; then
-        read -r result </dev/tty
-    else
-        read -r result
-    fi
+    IFS= read -r result || return 1
     if [[ -z "$result" && -n "$default" ]]; then
         result="$default"
     fi
-    result=$(echo "$result" | tr -d '\r' | xargs 2>/dev/null || echo "$result")
+    result="${result%$'\r'}"
     echo "$result"
 }
 
@@ -495,13 +617,7 @@ confirm() {
     else
         echo -ne "  ${BOLD}${prompt}${RST} ${DIM}[y/N]${RST}: " >&2
     fi
-    if [[ -t 0 ]]; then
-        read -r yn
-    elif [[ -e /dev/tty ]]; then
-        read -r yn </dev/tty
-    else
-        read -r yn
-    fi
+    IFS= read -r yn || return 1
     yn="${yn:-$default}"
     [[ "$yn" =~ ^[Yy] ]]
 }
@@ -511,14 +627,19 @@ confirm() {
 render_profile_cards() {
     local target="${1:-all}"
     if command -v python3 &>/dev/null; then
-        python3 -c "
+        SWITCH_COLOR="$SUPPORTS_COLOR" python3 - "$PROFILES_DIR" "$AUTH_FILE" "$ACTIVE_FILE" "$target" <<'PYCODE'
+import sys, re, os, builtins
+def print(*args, **kwargs):
+    if os.environ.get('SWITCH_COLOR') != 'true':
+        args = tuple(re.sub(r'\x1b\[[0-9;]*m', '', str(arg)) for arg in args)
+    builtins.print(*args, **kwargs)
 import json, sys, os, time, re, datetime, glob
 import urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-profiles_dir = '$PROFILES_DIR'
-auth_file_root = '$AUTH_FILE'
-active_file = '$ACTIVE_FILE'
+profiles_dir = sys.argv[1]
+auth_file_root = sys.argv[2]
+active_file = sys.argv[3]
 
 active_name = ''
 if os.path.exists(active_file):
@@ -559,7 +680,7 @@ def make_bar(percent, width=10):
         c = '\033[38;2;245;158;11m'
     else:
         c = '\033[38;2;16;163;127m'
-    return f'{c}{\"█\" * filled}\033[2m{\"░\" * empty}\033[0m'
+    return f'{c}{"█" * filled}\033[2m{"░" * empty}\033[0m'
 
 def get_profile_data(pname):
     p_auth = os.path.join(profiles_dir, pname, 'auth.json')
@@ -662,39 +783,8 @@ def get_profile_data(pname):
                     time.sleep(0.3)
                     continue
                 if e.code in (401, 403):
-                    rf = tokens.get('refresh_token')
-                    if rf and attempt == 0:
-                        try:
-                            r_data = urllib.parse.urlencode({
-                                'grant_type': 'refresh_token',
-                                'client_id': 'app_EMoamEEZ73f0CkXaXp7hrann',
-                                'refresh_token': rf
-                            }).encode()
-                            r_req = urllib.request.Request('https://auth.openai.com/oauth/token', data=r_data, headers={
-                                'Content-Type': 'application/x-www-form-urlencoded',
-                                'User-Agent': 'codex_cli_rs'
-                            })
-                            with urllib.request.urlopen(r_req, timeout=5) as r_resp:
-                                r_res = json.loads(r_resp.read().decode())
-                                new_at = r_res.get('access_token')
-                                new_rt = r_res.get('refresh_token')
-                                if new_at:
-                                    tokens['access_token'] = new_at
-                                    if new_rt:
-                                        tokens['refresh_token'] = new_rt
-                                    d['tokens'] = tokens
-                                    try:
-                                        with open(p_auth, 'w') as out_f:
-                                            json.dump(d, out_f, indent=2)
-                                    except Exception:
-                                        pass
-                                    headers['Authorization'] = f'Bearer {new_at}'
-                                    req = urllib.request.Request('https://chatgpt.com/backend-api/codex/usage', headers=headers)
-                                    continue
-                        except Exception:
-                            pass
-                    r1 = '\033[33musage: token inactive\033[0m'
-                    r2 = '\033[2m(switch to activate)\033[0m'
+                    r1 = '\033[33musage: access token rejected\033[0m'
+                    r2 = '\033[2m(open codex to renew login)\033[0m'
                 elif e.code == 429:
                     r1 = '\033[33m⚡ usage: rate limited\033[0m'
                     r2 = '\033[2m(try again shortly)\033[0m'
@@ -719,9 +809,9 @@ def get_profile_data(pname):
         'r2': r2,
     }
 
-target = '$target'
+target = sys.argv[4]
 if target == 'all' or not target:
-    profiles = sorted([os.path.basename(p) for p in glob.glob(os.path.join(profiles_dir, '*')) if os.path.isdir(p)])
+    profiles = sorted([os.path.basename(p) for p in glob.glob(os.path.join(profiles_dir, '*')) if os.path.isdir(p) and not os.path.islink(p) and re.fullmatch(r'[a-zA-Z0-9_-]+', os.path.basename(p)) and os.path.basename(p) != 'all'])
 else:
     profiles = [target] if os.path.isdir(os.path.join(profiles_dir, target)) else []
 
@@ -749,23 +839,23 @@ for item in data_list:
     if item['sub_expired']:
         sub_badge = '  \033[1;31m[EXPIRED]\033[0m'
     elif item['sub_days'] is not None:
-        sub_badge = f'  \033[38;2;90;210;175m🔒 {item[\"sub_days\"]}d remaining\033[0m'
+        sub_badge = f'  \033[38;2;90;210;175m🔒 {item["sub_days"]}d remaining\033[0m'
 
-    title = f'  {name_c}{item[\"name\"]}{rst}{act_badge}{sub_badge}'
+    title = f'  {name_c}{item["name"]}{rst}{act_badge}{sub_badge}'
     
     email_disp = item['email']
     if len(email_disp) > 22:
         email_disp = email_disp[:20] + '..'
     l1 = f'  {tree_c}├─{rst} {lbl_c}email{rst}  \033[1;36m{email_disp}\033[0m'
-    l2 = f'  {tree_c}└─{rst} {lbl_c}plan{rst}   \033[38;2;16;163;127m\033[1m{item[\"plan\"]}\033[0m'
+    l2 = f'  {tree_c}└─{rst} {lbl_c}plan{rst}   \033[38;2;16;163;127m\033[1m{item["plan"]}\033[0m'
 
-    print(f'  {border}┌{\"─\" * inner_w}┐{rst}')
+    print(f'  {border}┌{"─" * inner_w}┐{rst}')
     print(f'  {border}│{rst}' + pad_visible(title, inner_w) + f'{border}│{rst}')
     print(f'  {border}│{rst}' + pad_visible(l1, left_w) + div + pad_visible(item['r1'], right_w) + f'{border}│{rst}')
     print(f'  {border}│{rst}' + pad_visible(l2, left_w) + div + pad_visible(item['r2'], right_w) + f'{border}│{rst}')
-    print(f'  {border}└{\"─\" * inner_w}┘{rst}')
+    print(f'  {border}└{"─" * inner_w}┘{rst}')
     print('')
-"
+PYCODE
     else
         local pname="$target"
         [[ "$target" == "all" ]] && pname="$(get_active_profile)"
@@ -798,7 +888,8 @@ get_profile_names() {
     local profiles=()
     if [[ -d "$PROFILES_DIR" ]]; then
         for dir in "$PROFILES_DIR"/*/; do
-            [[ -d "$dir" ]] || continue
+            [[ -d "$dir" && ! -L "${dir%/}" ]] || continue
+            valid_profile_name "$(basename "$dir")" || continue
             profiles+=("$(basename "$dir")")
         done
     fi
@@ -816,6 +907,7 @@ get_profile_info() {
 # ── Commands ───────────────────────────────────────────────────
 
 cmd_save() {
+    acquire_profile_lock
     local name="${1:-}"
 
     show_mini_banner
@@ -830,11 +922,7 @@ cmd_save() {
         fi
     fi
 
-    name=$(echo "$name" | tr -cd '[:alnum:]_-')
-    if [[ -z "$name" ]]; then
-        msg_error "Profile name must contain alphanumeric characters, '-', or '_'"
-        exit 1
-    fi
+    validate_profile_name "$name"
 
     ensure_profiles_dir
 
@@ -844,6 +932,8 @@ cmd_save() {
         exit 1
     fi
 
+    validate_profile_name "$name"
+    validate_credentials "$AUTH_FILE"
     local profile_dir="$PROFILES_DIR/$name"
     if [[ -d "$profile_dir" ]]; then
         echo ""
@@ -856,8 +946,9 @@ cmd_save() {
     fi
 
     mkdir -p "$profile_dir"
-    cp "$AUTH_FILE" "$profile_dir/auth.json"
-    echo "$name" > "$ACTIVE_FILE"
+    chmod 700 "$profile_dir"
+    atomic_copy "$AUTH_FILE" "$profile_dir/auth.json"
+    set_active_profile "$name"
 
     echo ""
     msg_success "Profile ${BOLD}${BGREEN}'$name'${RST} saved!"
@@ -869,6 +960,7 @@ cmd_save() {
 }
 
 cmd_use() {
+    acquire_profile_lock
     local name="${1:-}"
 
     show_mini_banner
@@ -906,6 +998,7 @@ cmd_use() {
         fi
     fi
 
+    validate_profile_name "$name"
     local profile_dir="$PROFILES_DIR/$name"
     if [[ ! -f "$profile_dir/auth.json" ]]; then
         msg_error "Profile ${BOLD}'$name'${RST} not found!"
@@ -913,7 +1006,10 @@ cmd_use() {
         exit 1
     fi
 
-    if [[ "$name" == "$active" ]]; then
+    validate_credentials "$profile_dir/auth.json"
+
+    if [[ "$name" == "$active" && -s "$AUTH_FILE" ]]; then
+        validate_credentials "$AUTH_FILE"
         msg_info "Already on profile ${BOLD}'$name'${RST}"
         exit 0
     fi
@@ -922,13 +1018,22 @@ cmd_use() {
     if [[ -n "$active" && -f "$AUTH_FILE" ]]; then
         local current_dir="$PROFILES_DIR/$active"
         mkdir -p "$current_dir"
-        cp "$AUTH_FILE" "$current_dir/auth.json"
+        chmod 700 "$current_dir"
+        validate_credentials "$AUTH_FILE"
+        atomic_copy "$AUTH_FILE" "$current_dir/auth.json"
         msg_info "Auto-saved current profile '${BOLD}${active}${RST}'"
     fi
 
     # Switch auth
-    cp "$profile_dir/auth.json" "$AUTH_FILE"
-    echo "$name" > "$ACTIVE_FILE"
+    if [[ -z "$active" && -f "$AUTH_FILE" ]]; then
+        backup_untracked_login
+    fi
+    rm -f "$ACTIVE_FILE"
+    if ! atomic_copy "$profile_dir/auth.json" "$AUTH_FILE"; then
+        [[ -z "$active" ]] || set_active_profile "$active"
+        return 1
+    fi
+    set_active_profile "$name"
 
     echo ""
     msg_success "Switched to ${BOLD}${BGREEN}'$name'${RST}!"
@@ -995,12 +1100,12 @@ cmd_status() {
 
     render_profile_cards "$active"
 
-    msg_step "Verifying with Codex CLI..."
+    msg_step "Checking Codex CLI login status..."
     if command -v codex &>/dev/null; then
         local live_status
         live_status=$(codex login status 2>&1 || echo "Logged out")
         if [[ "$live_status" == *"Logged in"* ]]; then
-            msg_success "Session is ${BOLD}${GREEN}valid${RST} — ${live_status}"
+            msg_success "CLI reports ${BOLD}${GREEN}logged in${RST} — ${live_status}"
         else
             msg_warn "Status: ${live_status}"
         fi
@@ -1049,6 +1154,7 @@ cmd_usage() {
         return 1
     fi
 
+    validate_profile_name "$target"
     local auth_file="$PROFILES_DIR/$target/auth.json"
     if [[ ! -f "$auth_file" ]]; then
         msg_error "Profile '$target' not found!"
@@ -1069,6 +1175,7 @@ cmd_usage() {
 }
 
 cmd_rename() {
+    acquire_profile_lock
     local old_name="${1:-}"
     local new_name="${2:-}"
 
@@ -1097,6 +1204,7 @@ cmd_rename() {
         fi
     fi
 
+    validate_profile_name "$old_name"
     local old_dir="$PROFILES_DIR/$old_name"
     if [[ ! -d "$old_dir" ]]; then
         msg_error "Profile ${BOLD}'$old_name'${RST} not found!"
@@ -1112,11 +1220,7 @@ cmd_rename() {
         fi
     fi
 
-    new_name=$(echo "$new_name" | tr -cd '[:alnum:]_-')
-    if [[ -z "$new_name" ]]; then
-        msg_error "New profile name must contain alphanumeric characters, '-', or '_'"
-        exit 1
-    fi
+    validate_profile_name "$new_name"
 
     local new_dir="$PROFILES_DIR/$new_name"
     if [[ -d "$new_dir" ]]; then
@@ -1129,7 +1233,7 @@ cmd_rename() {
     local active
     active=$(get_active_profile)
     if [[ "$old_name" == "$active" ]]; then
-        echo "$new_name" > "$ACTIVE_FILE"
+        set_active_profile "$new_name"
     fi
 
     echo ""
@@ -1138,6 +1242,7 @@ cmd_rename() {
 }
 
 cmd_delete() {
+    acquire_profile_lock
     local name="${1:-}"
 
     show_mini_banner
@@ -1165,6 +1270,7 @@ cmd_delete() {
         fi
     fi
 
+    validate_profile_name "$name"
     local profile_dir="$PROFILES_DIR/$name"
     if [[ ! -d "$profile_dir" ]]; then
         msg_error "Profile ${BOLD}'$name'${RST} not found!"
@@ -1194,50 +1300,43 @@ cmd_delete() {
 }
 
 cmd_login() {
+    acquire_profile_lock
     show_mini_banner
     ensure_profiles_dir
-
-    echo -e "  ${BOLD}${ICO_KEY} Add a new Codex account${RST}"
-    echo ""
-
-    local active
-    active=$(get_active_profile)
-
-    # Auto-save current session if exists so you NEVER lose it!
-    if [[ -f "$AUTH_FILE" ]]; then
-        if [[ -n "$active" ]]; then
-            local current_dir="$PROFILES_DIR/$active"
-            mkdir -p "$current_dir"
-            cp "$AUTH_FILE" "$current_dir/auth.json"
-            msg_info "Current profile '${BOLD}${active}${RST}' auto-saved"
-            echo ""
-        else
-            msg_warn "Existing active Codex session detected!"
-            msg_info "Saving your current session first so you don't lose it..."
-            echo ""
-            local prev_name
-            prev_name=$(input_prompt "Name for your current logged-in account" "main")
-            prev_name="${prev_name:-main}"
-            cmd_save "$prev_name"
-            echo ""
-        fi
+    if ! command -v codex >/dev/null; then
+        msg_error "Codex CLI is not installed."
+        return 1
     fi
-
-    msg_step "Opening Codex login..."
-    echo ""
-
-    # Run codex login
-    codex login
-
-    echo ""
-
-    # Ask for profile name
-    local name
-    name=$(input_prompt "${ICO_KEY} Save new account as" "")
-    if [[ -n "$name" ]]; then
-        cmd_save "$name"
+    local active backup="" name
+    active=$(get_active_profile)
+    if [[ -f "$AUTH_FILE" ]]; then
+        validate_credentials "$AUTH_FILE"
+        backup=$(mktemp "$PROFILES_DIR/.unsaved-XXXXXX")
+        atomic_copy "$AUTH_FILE" "$backup"
+        if [[ -n "$active" ]]; then
+            mkdir -p "$PROFILES_DIR/$active"
+            chmod 700 "$PROFILES_DIR/$active"
+            atomic_copy "$AUTH_FILE" "$PROFILES_DIR/$active/auth.json"
+        fi
+        msg_info "Current login backed up at $backup"
+    fi
+    LOGIN_BACKUP="$backup"
+    LOGIN_PREVIOUS_ACTIVE="$active"
+    LOGIN_PENDING=true
+    rm -f "$ACTIVE_FILE"
+    msg_step "Opening codex login..."
+    if codex login && validate_credentials "$AUTH_FILE"; then
+        LOGIN_PENDING=false
+        name=$(input_prompt "Save new account as" "") || name=""
+        if [[ -n "$name" ]]; then
+            cmd_save "$name"
+        else
+            msg_info "Login is untracked. Save it with: codex-switch save <name>"
+        fi
     else
-        msg_info "Skipped saving. You can save later with: ${BOLD}codex-switch save <name>${RST}"
+        restore_login || return 1
+        msg_error "Login failed; previous file credentials restored."
+        return 1
     fi
 }
 
@@ -1277,7 +1376,7 @@ cmd_help() {
     echo ""
     echo -e "    Swaps ${ULINE}~/.codex/auth.json${RST} between saved snapshots."
     echo -e "    ${GREEN}${ICO_CHECK}${RST} No logout required       ${GREEN}${ICO_CHECK}${RST} Shared /resume history"
-    echo -e "    ${GREEN}${ICO_CHECK}${RST} Auto-saves on switch     ${GREEN}${ICO_CHECK}${RST} Zero dependencies"
+    echo -e "    ${GREEN}${ICO_CHECK}${RST} Auto-saves on switch     ${GREEN}${ICO_CHECK}${RST} Python 3 required"
     echo ""
 }
 
@@ -1333,4 +1432,7 @@ main() {
     esac
 }
 
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 main "$@"

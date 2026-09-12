@@ -3,28 +3,28 @@
 <p align="center">
   <pre align="center">
        ▄▄██████▄▄       
-    ▄████▀▀  ▀▀████▄      <b>CODEX-SWITCH</b>  v1.0.0
+    ▄████▀▀  ▀▀████▄      <b>CODEX-SWITCH</b>  v1.1.1
   ▄███▀   ▄██▄   ▀███▄    Multi-account manager for OpenAI Codex CLI
  ▄███    ██████    ███▄   ─────────────────────────────────────────
  ███   ▄████████▄   ███   ▸ <b>shared /resume</b>  ✔ all accounts access sessions
- ███  █████  █████  ███   ▸ <b>version</b>        1.0.0 #stable
+ ███  █████  █████  ███   ▸ <b>version</b>        1.1.1 #stable
  ███   ▀████████▀   ███   ▸ <b>repo</b>           https://github.com/Kyaa-A/codex-switch
  ▀███    ██████    ███▀   ▸ <b>status</b>         ● ready
   ▀███▄   ▀██▀   ▄███▀    ─────────────────────────────────────────
-    ▀████▄▄  ▄▄████▀      Zero logout · Shared /resume · Pure bash
+    ▀████▄▄  ▄▄████▀      Zero logout · Shared /resume · Bash + Python 3
        ▀▀██████▀▀       
   </pre>
 </p>
 
 <p align="center">
-  <b>Switch between multiple OpenAI Codex CLI accounts without logging out — with 100% shared <code>/resume</code> session history across every account. Zero dependencies. Pure bash.</b>
+  <b>Switch between multiple OpenAI Codex CLI accounts without logging out — while preserving local <code>/resume</code> session history. Bash + Python 3.</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/openai-10A37F?style=for-the-badge&logo=openai&logoColor=white" alt="OpenAI">
-  <img src="https://img.shields.io/badge/bash-pure-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Pure Bash">
+  <img src="https://img.shields.io/badge/bash-cli-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Bash CLI">
   <img src="https://img.shields.io/badge/shared%20resume-supported-brightgreen?style=for-the-badge" alt="Shared Resume">
-  <img src="https://img.shields.io/badge/dependencies-zero-blue?style=for-the-badge" alt="Zero Dependencies">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=for-the-badge" alt="MIT License">
 </p>
 
@@ -45,8 +45,19 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
 
 1. **Only authentication credentials (`~/.codex/auth.json`) are swapped.**
 2. **Local thread histories, database logs, and sessions (`~/.codex/sessions/`, `history.jsonl`, `thread_history_1.sqlite`) remain untouched and shared.**
-3. **You can start a task on Account A, switch to Account B, and immediately run `codex resume` or `/resume` to continue the exact same conversation seamlessly!**
+3. **You can start a task on Account A, switch to Account B, then start a new CLI session and run `codex resume` or `/resume` to resume a saved conversation when supported by the CLI and account!**
 4. **No `/logout` ever happens** — your tokens stay cached and ready to swap instantly.
+
+
+## Requirements and account safety
+
+- Uses file-based credentials only. Respects `CODEX_HOME` (default `~/.codex`). Configure `cli_auth_credentials_store = "file"` in `config.toml` before using this tool. Keyring, auto, and ephemeral storage are not supported. See [Codex credential storage](https://developers.openai.com/codex/auth).
+- Close other CLI sessions before switching; running processes may keep or refresh their own credentials. After a manual login outside this tool, run `codex-switch save <name>` before switching so the tracking name matches the new account.
+- Profile directories use mode `0700`; credential snapshots use `0600` and atomic replacement. Concurrent switcher mutations are blocked by `.profiles/.lock`. After a forced kill, remove that empty lock directory only after confirming no switcher is running.
+- Failed or interrupted login restores the previous file credentials. A successful login stays untracked until saved. Untracked credentials are preserved in `.profiles/.unsaved-*` before switching; these sensitive backups can be restored to a named profile by copying one to `.profiles/<name>/auth.json` inside a private profile directory.
+- `list` and `usage` may make read-only quota requests, but never refresh or rewrite tokens. Usage availability depends on the provider endpoint and token validity. `status` reports the native CLI's login status, not proof that a model request will succeed.
+- Session files remain local and untouched. Resume availability still depends on the native CLI, selected project, and account permissions.
+
 
 ---
 
@@ -56,15 +67,15 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
 
 ```
        ▄▄██████▄▄       
-    ▄████▀▀  ▀▀████▄      CODEX-SWITCH  v1.0.0
+    ▄████▀▀  ▀▀████▄      CODEX-SWITCH  v1.1.1
   ▄███▀   ▄██▄   ▀███▄    Multi-account manager for OpenAI Codex CLI
  ▄███    ██████    ███▄   ─────────────────────────────────────────
  ███   ▄████████▄   ███   ▸ shared /resume  ✔ all accounts access sessions
- ███  █████  █████  ███   ▸ version        1.0.0 #stable
+ ███  █████  █████  ███   ▸ version        1.1.1 #stable
  ███   ▀████████▀   ███   ▸ repo           https://github.com/Kyaa-A/codex-switch
  ▀███    ██████    ███▀   ▸ status         ● ready
   ▀███▄   ▀██▀   ▄███▀    ─────────────────────────────────────────
-    ▀████▄▄  ▄▄████▀      Zero logout · Shared /resume · Pure bash
+    ▀████▄▄  ▄▄████▀      Zero logout · Shared /resume · Bash + Python 3
        ▀▀██████▀▀       
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -85,7 +96,7 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
 
   QUICK START
 
-    # Step 1: Save current login under any name you want
+    # Step 1: Save current login under a profile name
     $ codex-switch save <name>
 
     # Step 2: Login to another account
@@ -101,7 +112,7 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
 ### Profile Cards with Live Usage & Shared Sessions (`codex-switch list`)
 
 ```
-     ▄████▄   codex-switch v1.1.0
+     ▄████▄   codex-switch v1.1.1
     ███  ███  Multi-account manager for OpenAI Codex CLI
      ▀████▀   Shared /resume · https://github.com/Kyaa-A/codex-switch
 
@@ -125,7 +136,7 @@ Currently, you have to run `codex logout` and then `codex login` every single ti
 ### Interactive Switcher (`codex-switch use`)
 
 ```
-     ▄████▄   codex-switch v1.1.0
+     ▄████▄   codex-switch v1.1.1
     ███  ███  Multi-account manager for OpenAI Codex CLI
      ▀████▀   Shared /resume · https://github.com/Kyaa-A/codex-switch
 
@@ -189,6 +200,7 @@ codex resume                  # continue any session across any account!
 | `codex-switch save <name>` | | Save current credentials as a named profile |
 | `codex-switch use [name]` | `switch` | Switch to a profile (interactive picker if omitted) |
 | `codex-switch list` | `ls` | List all profiles and show shared session pool count |
+| `codex-switch usage [name|all]` | `limits` | Show quota usage and reset times |
 | `codex-switch rename [old] [new]` | `mv` | Rename an existing profile to any new name |
 | `codex-switch status` | `whoami` | Show active profile and verify token against Codex CLI |
 | `codex-switch login` | `add` | Safely login to a new account without losing current one |
@@ -214,7 +226,7 @@ OpenAI Codex CLI stores its state in `~/.codex/`:
         └── auth.json
 ```
 
-Because `codex-switch` **only swaps `auth.json`**, your session database is 100% preserved and shared. 
+Because `codex-switch` **only swaps `auth.json`**, your session database remains untouched.
 
 You can start a session on `work`, switch to `personal` when daily quota is reached, and continue right where you left off with `codex resume --last`.
 
@@ -232,10 +244,20 @@ You can start a session on `work`, switch to `personal` when daily quota is reac
 **Yes.** Whether you logged in with ChatGPT or via API key (`codex login --with-api-key`), `codex-switch` handles both.
 
 #### Are any dependencies required?
-**None.** It's 100% pure bash. Works on macOS and Linux out-of-the-box.
+**Bash, Python 3.11+, and standard Unix utilities.** Python validates credentials before writes and renders account details and usage. The installer also needs curl or wget.
 
 ---
 
 ## 📄 License
 
 MIT © [Kyaa-A](https://github.com/Kyaa-A)
+
+## Development checks
+
+```bash
+bash -n codex-switch
+bash -n install.sh
+python3 -m unittest discover -s tests -v
+```
+
+Tests execute the real switcher against temporary files and synthetic credentials. Native login commands and HTTP calls are replaced at the external boundary; no real account or network access is needed.

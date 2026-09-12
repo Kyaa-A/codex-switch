@@ -23,21 +23,31 @@ echo ""
 
 mkdir -p "$INSTALL_DIR"
 
+DOWNLOAD_PATH=$(mktemp "$INSTALL_DIR/.codex-switch.XXXXXX")
+trap 'rm -f "$DOWNLOAD_PATH"' EXIT
+
 if command -v curl &>/dev/null; then
-    curl -fsSL "$REPO_URL" -o "$INSTALL_PATH"
+    curl -fsSL "$REPO_URL" -o "$DOWNLOAD_PATH"
 elif command -v wget &>/dev/null; then
-    wget -qO "$INSTALL_PATH" "$REPO_URL"
+    wget -qO "$DOWNLOAD_PATH" "$REPO_URL"
 else
     echo "  Error: curl or wget required"
     exit 1
 fi
 
-chmod +x "$INSTALL_PATH"
+[[ -s "$DOWNLOAD_PATH" ]] || { echo "  Error: empty download" >&2; exit 1; }
+bash -n "$DOWNLOAD_PATH"
+[[ "$(head -n 1 "$DOWNLOAD_PATH")" == '#!/usr/bin/env bash' ]] || {
+    echo "  Error: downloaded file is not a Bash script" >&2
+    exit 1
+}
+chmod 755 "$DOWNLOAD_PATH"
+mv -f "$DOWNLOAD_PATH" "$INSTALL_PATH"
 
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo -e "  ${DIM}Adding ~/.local/bin to PATH...${RST}"
 
-    SHELL_NAME=$(basename "$SHELL")
+    SHELL_NAME=$(basename "${SHELL:-bash}")
     RC_FILE=""
     case "$SHELL_NAME" in
         bash) RC_FILE="$HOME/.bashrc" ;;
@@ -46,6 +56,7 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     esac
 
     if [[ -n "$RC_FILE" ]]; then
+        mkdir -p "$(dirname "$RC_FILE")"
         if [[ "$SHELL_NAME" == "fish" ]]; then
             echo "set -gx PATH \$HOME/.local/bin \$PATH" >> "$RC_FILE"
         else
